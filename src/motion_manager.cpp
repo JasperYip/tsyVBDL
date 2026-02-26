@@ -1,13 +1,23 @@
 #include "motion_manager.h"
 #include <math.h>
 
-MotionManager::MotionManager() {}
+MotionManager::MotionManager() {
+    PIDController::Config pcfg;
+    pcfg.kp = PID_KP;
+    pcfg.ki = PID_KI;
+    pcfg.kd = PID_KD;
 
-void MotionManager::setConfig(const MotionConfig& cfg) {
-    cfg_ = cfg;
-    // keep PID dt consistent
-    PIDController::Config pcfg = pid_.getConfig();
-    pcfg.dt_s = cfg_.dt_s;
+    pcfg.dt_s = CONTROL_DT_S;
+    pcfg.deadband_mm = PID_DEADBAND_MM;
+
+    pcfg.out_min = PID_OUT_MIN;
+    pcfg.out_max = PID_OUT_MAX;
+
+    pcfg.i_min = PID_I_MIN;
+    pcfg.i_max = PID_I_MAX;
+
+    pcfg.d_max_abs = PID_D_MAX_ABS;
+
     pid_.setConfig(pcfg);
 }
 
@@ -27,24 +37,24 @@ float MotionManager::clampf(float v, float lo, float hi) const {
 
 float MotionManager::pctToMm(uint8_t pct) const {
     if (pct > 100) pct = 100;
-    const float span = cfg_.stroke_max_mm - cfg_.stroke_min_mm;
-    return cfg_.stroke_min_mm + (span * ((float)pct / 100.0f));
+    const float span = STROKE_HARD_MAX_MM - STROKE_HARD_MIN_MM;
+    return STROKE_HARD_MIN_MM + (span * ((float)pct / 100.0f));
 }
 
 float MotionManager::applySoftZones(float pos_mm, float effort) const {
     // Only scale effort if it drives further INTO the soft boundary.
     // Min boundary (near 10mm)
-    if (effort < 0.0f && pos_mm < cfg_.soft_min_end_mm) {
-        float scale = (pos_mm - cfg_.soft_min_start_mm) /
-                      (cfg_.soft_min_end_mm - cfg_.soft_min_start_mm);
+    if (effort < 0.0f && pos_mm < STROKE_SOFT_MIN_END_MM) {
+        float scale = (pos_mm - STROKE_HARD_MIN_MM) /
+                      (STROKE_SOFT_MIN_END_MM - STROKE_HARD_MIN_MM);
         scale = clampf(scale, 0.0f, 1.0f);
         effort *= scale;
     }
 
     // Max boundary (near 140mm)
-    if (effort > 0.0f && pos_mm > cfg_.soft_max_start_mm) {
-        float scale = (cfg_.soft_max_end_mm - pos_mm) /
-                      (cfg_.soft_max_end_mm - cfg_.soft_max_start_mm);
+    if (effort > 0.0f && pos_mm > STROKE_SOFT_MAX_START_MM) {
+        float scale = (STROKE_HARD_MAX_MM - pos_mm) /
+                      (STROKE_HARD_MAX_MM - STROKE_SOFT_MAX_START_MM);
         scale = clampf(scale, 0.0f, 1.0f);
         effort *= scale;
     }
@@ -53,7 +63,7 @@ float MotionManager::applySoftZones(float pos_mm, float effort) const {
 }
 
 float MotionManager::applyVelocityLimit(float vel_mm_s, float effort) const {
-    const float vmax = cfg_.v_max_mm_s;
+    const float vmax = V_MAX_MM_S;
     if (vmax <= 0.0f) return effort;
 
     if (vel_mm_s > vmax && effort > 0.0f) return 0.0f;
@@ -109,7 +119,7 @@ void MotionManager::tick(const MotionInputs& in) {
     if (in.driver_flt) setHardFault(HF_DRIVER, FirstHardFaultIndex::DRIVER);
 
     // Hard limit check (position beyond usable envelope)
-    if (in.pos_est_mm < cfg_.hard_min_mm || in.pos_est_mm > cfg_.hard_max_mm) {
+    if (in.pos_est_mm < STROKE_HARD_MIN_MM || in.pos_est_mm > STROKE_HARD_MAX_MM) {
         setHardFault(HF_POS_LIM, FirstHardFaultIndex::POS_LIM);
     }
 
@@ -131,6 +141,14 @@ void MotionManager::tick(const MotionInputs& in) {
 
     motor_cmd_.slp_enable = true;
 
+    // ENFORCE: motor cannot be enabled unless homed or actively homing
+    if (!homed_ && !cmd_.request_homing) {
+        setHardFault(HF_NOT_HOMED, FirstHardFaultIndex::NOT_HOMED);
+        enterFault();
+        updateStatus(in, 0.0f);
+        return;
+    }
+
     // State machine
     if (cmd_.request_homing && !homed_) {
         state_ = VbdState::HOMING;
@@ -143,10 +161,10 @@ void MotionManager::tick(const MotionInputs& in) {
     float effort = 0.0f;
 
     if (state_ == VbdState::HOMING) {
-        homing_time_s_ += cfg_.dt_s;
+        homing_time_s_ += CONTROL_DT_S;
 
         // Drive gently toward min boundary until prox triggers
-        effort = cfg_.homing_effort; // negative retract assumed
+        effort = HOMING_EFFORT; // negative retract assumed
 
         // If prox triggers, declare homed and reset PID
         if (in.prox_active) {
@@ -154,7 +172,7 @@ void MotionManager::tick(const MotionInputs& in) {
             state_ = VbdState::RUN;
             homing_time_s_ = 0.0f;
             pid_.reset(in.pos_est_mm);
-        } else if (homing_time_s_ > cfg_.homing_timeout_s) {
+        } else if (homing_time_s_ > HOMING_TIMEOUT_S) {
             setHardFault(HF_NOT_HOMED, FirstHardFaultIndex::NOT_HOMED);
             enterFault();
             updateStatus(in, 0.0f);
@@ -173,14 +191,14 @@ void MotionManager::tick(const MotionInputs& in) {
             updateStatus(in, 0.0f);
             return;
         } else {
-            const float target_mm = clampf(pctToMm(cmd_.target_pct), cfg_.hard_min_mm, cfg_.hard_max_mm);
+            const float target_mm = clampf(pctToMm(cmd_.target_pct), STROKE_HARD_MIN_MM, STROKE_HARD_MAX_MM);
             const float err_mm = target_mm - in.pos_est_mm;
 
             // Relaxed hold logic
             if (!relaxed_hold_) {
-                if (fabsf(err_mm) < cfg_.hold_enter_err_mm) {
-                    in_band_time_s_ += cfg_.dt_s;
-                    if (in_band_time_s_ >= cfg_.hold_enter_time_s) {
+                if (fabsf(err_mm) < HOLD_ENTER_ERR_MM) {
+                    in_band_time_s_ += CONTROL_DT_S;
+                    if (in_band_time_s_ >= HOLD_ENTER_TIME_S) {
                         relaxed_hold_ = true;
                     }
                 } else {
@@ -188,7 +206,7 @@ void MotionManager::tick(const MotionInputs& in) {
                 }
             } else {
                 // In relaxed hold, only re-engage if drift is large
-                if (fabsf(err_mm) > cfg_.hold_exit_drift_mm) {
+                if (fabsf(err_mm) > HOLD_EXIT_DRIFT_MM) {
                     relaxed_hold_ = false;
                     in_band_time_s_ = 0.0f;
                     pid_.reset(in.pos_est_mm); // avoid derivative spike
