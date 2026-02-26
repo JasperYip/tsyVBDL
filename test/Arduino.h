@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cmath>
 
 // Minimal Arduino API surface used by MotorDriver
 #define OUTPUT 1

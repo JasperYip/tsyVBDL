@@ -18,6 +18,9 @@ constexpr float LEAD_SCREW_PITCH_MM = 4.0f;  // 4mm per revolution
 constexpr uint16_t ENCODER_COUNTS_PER_REV_SPEC = 1024;
 constexpr uint8_t ENCODER_QUAD_MULT = 4;     // change if library differs
 
+// Which QuadEncoder hardware channel to use (1..4)
+constexpr uint8_t ENCODER_HW_CHANNEL = 2;  // pins 2/3 example in docs
+
 // =============================
 // Control Loop Timing
 // =============================
