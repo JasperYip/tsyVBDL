@@ -1,0 +1,43 @@
+#include <Arduino.h>
+#include "config/pin_map.hpp"
+#include "utils/logger.hpp"
+#include "drivers/encoder_driver.hpp"
+
+// zero encoder -> read counts -> convert to mm (prints at 10Hz)
+// motor driver off
+
+static EncoderDriver enc({
+  .qdec_channel = 1,
+  .pin_a = PIN_ENC_A,
+  .pin_b = PIN_ENC_B,
+  .pin_z = PIN_ENC_Z,
+
+  // TEMP placeholders (tune in Phase 2)
+  .counts_per_rev = 4096,  //needs to check
+  .lead_screw_pitch_mm = 4.0f
+});
+
+void setup() {
+  // ---- HARD SAFETY: ensure motor is disabled ----
+  pinMode(PIN_MOTOR_SLP, OUTPUT);
+  digitalWrite(PIN_MOTOR_SLP, LOW);  // put driver in sleep
+
+  logger::begin(115200);
+  LOGI(F("Encoder smoke test"));
+
+  enc.begin();
+  enc.writeCounts(0);
+  LOGI(F("Encoder initialized and zeroed."));
+}
+
+void loop() {
+  const int32_t c = enc.readCounts();
+  const float mm = enc.readPositionMm();
+
+  Serial.print("counts=");
+  Serial.print(c);
+  Serial.print("  pos_mm=");
+  Serial.println(mm, 3);
+
+  delay(100); // 10 Hz
+}

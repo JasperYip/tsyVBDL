@@ -1,0 +1,76 @@
+#include <Arduino.h>
+#include "config/pin_map.hpp"
+#include "utils/logger.hpp"
+#include "drivers/motor_driver.hpp"
+
+// enables driver -> set direction -> ramps PWM -> prints current + fault -> stops
+
+static MotorDriver motor({
+  .pin_pwm = PIN_MOTOR_PWM,
+  .pin_dir = PIN_MOTOR_DIR,
+  .pin_slp = PIN_MOTOR_SLP,
+  .pin_flt = PIN_MOTOR_FLT,
+  .pin_cs  = PIN_MOTOR_CS,
+
+  .pwm_freq_hz = 25000.0f,
+  .pwm_max = 255,
+
+  .flt_active_low = true,
+
+  .cs_volts_per_amp = 0.04f,
+  .adc_ref_volts = 3.3f,
+  .adc_bits = 12
+});
+
+void setup() {
+  logger::begin(115200);
+  LOGI(F("Motor driver smoke test"));
+  motor.begin();
+
+  motor.enable();
+  motor.setDirection(MotorDriver::Direction::EXTEND);
+  LOGI(F("Motor enabled, direction=EXTEND"));
+}
+
+void loop() {
+  // If fault, stop immediately
+  if (motor.faultActive()) {
+    motor.stop();
+    LOGE(F("MOTOR FAULT ACTIVE! PWM stopped."));
+    delay(500);
+    return;
+  }
+
+  // Ramp up then down
+  for (int pwm = 0; pwm <= 120; pwm += 10) {
+    motor.setPWM((uint16_t)pwm);
+    Serial.print("pwm=");
+    Serial.print(pwm);
+    Serial.print("  I(A)=");
+    Serial.print(motor.readCurrentA(), 2);
+    Serial.print("  flt=");
+    Serial.println(motor.faultActive() ? 1 : 0);
+    delay(300);
+  }
+
+  motor.stop();
+  delay(1000);
+
+  // Reverse and do it again
+  motor.setDirection(MotorDriver::Direction::RETRACT);
+  for (int pwm = 0; pwm <= 120; pwm += 10) {
+    motor.setPWM((uint16_t)pwm);
+    Serial.print("pwm=");
+    Serial.print(pwm);
+    Serial.print("  I(A)=");
+    Serial.print(motor.readCurrentA(), 2);
+    Serial.print("  flt=");
+    Serial.println(motor.faultActive() ? 1 : 0);
+    delay(300);
+  }
+
+  motor.stop();
+  delay(1500);
+
+  motor.setDirection(MotorDriver::Direction::EXTEND);
+}
