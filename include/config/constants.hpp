@@ -1,49 +1,137 @@
 #pragma once
+
+/*
+------------------------------------------------------------
+VBD TEENSY SYSTEM CONSTANTS
+------------------------------------------------------------
+
+All global system configuration values live here.
+
+Rules:
+- No hardware pins here (pin_map.hpp handles that)
+- No driver-specific constants
+- Only system behaviour parameters
+
+Units are explicitly stated to avoid ambiguity.
+------------------------------------------------------------
+*/
+
 #include <stdint.h>
 
-// =============================
-// Core timing (Phase 1 defaults)
-// =============================
-constexpr float CONTROL_DT_S = 0.001f;      // 1 kHz control loop (used later)
-constexpr float PWM_FREQ_HZ  = 25000.0f;    // 25 kHz motor PWM
+namespace config
+{
 
-// =============================
-// Piston mechanical limits (mm)
-// Physical usable range is 0–150 but we *crop* to 10–140
-// =============================
-constexpr float STROKE_MIN_MM = 10.0f;
-constexpr float STROKE_MAX_MM = 140.0f;
+/* ----------------------------------------------------------
+   NODE CONFIGURATION
+---------------------------------------------------------- */
 
-// Soft zones (slow down near ends)
-// 10–20 mm and 130–140 mm
-constexpr float SOFT_MIN_END_MM   = 20.0f;
-constexpr float SOFT_MAX_START_MM = 130.0f;
+constexpr uint8_t NODE_ID_LEFT  = 1;
+constexpr uint8_t NODE_ID_RIGHT = 2;
 
-// Home reference
-// Prox triggers when piston is at ~10 mm
-constexpr float HOME_MM = 10.0f;
 
-// =============================
-// Stroke percentage mapping
-// 0–100% → 10–140 mm
-// =============================
-constexpr float STROKE_SPAN_MM = (STROKE_MAX_MM - STROKE_MIN_MM);
+/* ----------------------------------------------------------
+   CONTROL LOOP
+---------------------------------------------------------- */
 
-// =============================
-// Encoder / mechanics
-// =============================
-constexpr int32_t ENCODER_COUNTS_PER_REV = 1024;  // your current assumption (verify x1 vs x4)
-constexpr float   LEAD_SCREW_PITCH_MM    = 4.0f;  // 4 mm per revolution
+constexpr uint32_t CONTROL_HZ = 1000;        // Control loop frequency
+constexpr float CONTROL_DT_S  = 1.0f / CONTROL_HZ;
 
-// =============================
-// BMS
-// =============================
-constexpr uint32_t BMS_BAUDRATE = 115200;
+constexpr uint32_t PWM_FREQ_HZ = 25000;      // Motor PWM frequency
 
-// =============================
-// Fault beacon/log rates (used later)
-// =============================
-constexpr float FAULT_BEACON_HZ = 2.0f;
-constexpr float STATUS_CONTROL_HZ = 50.0f;
-constexpr float STATUS_BMS_HZ = 1.0f;
-constexpr float CMD_SETPOINT_HZ = 20.0f;
+
+/* ----------------------------------------------------------
+   STROKE GEOMETRY
+---------------------------------------------------------- */
+
+constexpr float STROKE_REAL_MIN_MM = 0.0f;
+constexpr float STROKE_REAL_MAX_MM = 150.0f;
+
+// usable control range
+constexpr float STROKE_HARD_MIN_MM = 10.0f;
+constexpr float STROKE_HARD_MAX_MM = 140.0f;
+
+// soft zones
+constexpr float STROKE_SOFT_START_MM = 20.0f;
+constexpr float STROKE_SOFT_END_MM   = 130.0f;
+
+// stroke span
+constexpr float STROKE_SPAN_MM = STROKE_HARD_MAX_MM - STROKE_HARD_MIN_MM;
+
+/* ----------------------------------------------------------
+   POSITION CONTROL
+---------------------------------------------------------- */
+
+constexpr float POSITION_TOLERANCE_MM = 1.0f;   // enter hold mode
+constexpr float DRIFT_RESTART_MM      = 2.0f;   // restart PID
+
+
+/* ----------------------------------------------------------
+   ESTIMATOR PARAMETERS
+---------------------------------------------------------- */
+
+constexpr float ESTIMATOR_TOF_GAIN = 0.02f;
+
+constexpr float SLIP_DETECT_THRESHOLD_MM = 3.0f;
+constexpr float SLIP_RECOVERY_GAIN       = 0.2f;
+
+
+/* ----------------------------------------------------------
+   TOF SENSOR VALIDATION
+---------------------------------------------------------- */
+
+constexpr uint16_t TOF_MIN_VALID_MM = 8;
+
+
+/* ----------------------------------------------------------
+   ENCODER + MECHANICS
+---------------------------------------------------------- */
+
+constexpr float LEAD_SCREW_MM_PER_REV = 4.0f;
+
+constexpr uint16_t ENCODER_CPR = 1024;
+constexpr uint8_t ENCODER_QUAD = 4;
+
+constexpr uint32_t ENCODER_COUNTS_PER_REV = ENCODER_CPR * ENCODER_QUAD;
+
+constexpr float MM_PER_COUNT =
+    LEAD_SCREW_MM_PER_REV / ENCODER_COUNTS_PER_REV;
+
+
+/* ----------------------------------------------------------
+   CURRENT SENSE
+---------------------------------------------------------- */
+
+// Motor driver current sense gain
+constexpr float CURRENT_SENSE_MV_PER_A = 40.0f;
+
+
+/* ----------------------------------------------------------
+   CAN POSITION SCALING
+---------------------------------------------------------- */
+
+// Estimated position sent in 0.1mm units
+constexpr float CAN_POS_SCALE = 10.0f;
+
+
+/* ----------------------------------------------------------
+   SAFETY PLACEHOLDERS
+---------------------------------------------------------- */
+
+constexpr float MAX_MOTOR_CURRENT_A = 15.0f;
+
+constexpr int16_t MAX_PACK_TEMP_C = 60;
+
+constexpr uint16_t MIN_PACK_VOLTAGE_MV = 18000;
+constexpr uint16_t MAX_PACK_VOLTAGE_MV = 30000;
+
+
+// command timeout
+constexpr uint32_t CMD_TIMEOUT_SMALL_MS = 300;
+constexpr uint32_t CMD_TIMEOUT_LARGE_MS = 120000;
+
+
+// BMS timeout
+constexpr uint32_t BMS_TIMEOUT_SMALL_MS = 5000;
+constexpr uint32_t BMS_TIMEOUT_LARGE_MS = 120000;
+
+}
