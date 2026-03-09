@@ -38,9 +38,11 @@ constexpr uint16_t STATUS_BMS_BASE     = 0x210;
 
 enum SystemState : uint8_t
 {
-    STATE_INIT_HOMING = 0,
-    STATE_RUN         = 1,
-    STATE_FAULT       = 2
+    STATE_UNHOMED = 0,
+    STATE_HOMING      = 1,
+    STATE_RUN         = 2,
+    STATE_HOLD        = 3,
+    STATE_FAULT       = 4
 };
 
 

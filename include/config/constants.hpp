@@ -61,18 +61,32 @@ constexpr float STROKE_SPAN_MM = STROKE_HARD_MAX_MM - STROKE_HARD_MIN_MM;
    POSITION CONTROL
 ---------------------------------------------------------- */
 
-constexpr float POSITION_TOLERANCE_MM = 1.0f;   // enter hold mode
-constexpr float DRIFT_RESTART_MM      = 2.0f;   // restart PID
+constexpr float POS_TOL_MM = 1.0f;   // enter hold mode
+constexpr float DRIFT_RESTART_MM = 2.0f;   // restart PID
 
+constexpr float HOMING_PWM = 0.20f;          // slow homing
+constexpr float HOMING_BACKOFF_PWM = 0.10f;  //even slower correction
+constexpr float SOFT_ZONE_MAX_DUTY = 0.30f;   // slower in soft zone
+/* ----------------------------------------------------------
+   PID GAINS
+---------------------------------------------------------- */
+constexpr float PID_KP = 0.02f;
+constexpr float PID_KI = 0.0f;
+constexpr float PID_KD = 0.002f;
+
+constexpr float PID_I_LIMIT = 5.0f;
+constexpr float PID_OUT_LIMIT = 1.0f;
+
+// constexpr float TOF_OFFSET_MM = 0.0f;
 
 /* ----------------------------------------------------------
    ESTIMATOR PARAMETERS
 ---------------------------------------------------------- */
 
-constexpr float ESTIMATOR_TOF_GAIN = 0.02f;
+constexpr float TOF_FUSION_GAIN = 0.02f;
 
-constexpr float SLIP_DETECT_THRESHOLD_MM = 3.0f;
-constexpr float SLIP_RECOVERY_GAIN       = 0.2f;
+constexpr float SLIP_DETECT_MM = 3.0f;
+constexpr float SLIP_RECOVERY_GAIN = 0.2f;
 
 
 /* ----------------------------------------------------------
@@ -90,11 +104,14 @@ constexpr float LEAD_SCREW_MM_PER_REV = 4.0f;
 
 constexpr uint16_t ENCODER_CPR = 1024;
 constexpr uint8_t ENCODER_QUAD = 4;
+constexpr uint16_t GEAR_RATIO = 156;
 
 constexpr uint32_t ENCODER_COUNTS_PER_REV = ENCODER_CPR * ENCODER_QUAD;
 
+constexpr uint32_t COUNTS_PER_SCREW_REV = ENCODER_COUNTS_PER_REV * GEAR_RATIO;
+
 constexpr float MM_PER_COUNT =
-    LEAD_SCREW_MM_PER_REV / ENCODER_COUNTS_PER_REV;
+    LEAD_SCREW_MM_PER_REV / COUNTS_PER_SCREW_REV;
 
 
 /* ----------------------------------------------------------

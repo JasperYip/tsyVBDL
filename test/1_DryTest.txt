@@ -1,0 +1,73 @@
+#include <Arduino.h>
+#include "drivers/motor_driver.hpp"
+#include "config/pin_map.hpp"
+#include "config/constants.hpp"
+
+MotorDriver motor;
+
+enum class State
+{
+    RETRACT,
+    BACKOFF,
+    DONE
+};
+
+State state = State::RETRACT;
+
+void setup()
+{
+    Serial.begin(115200);
+    delay(2000);
+
+    pinMode(PIN_PROX, INPUT_PULLUP);
+
+    motor.begin();
+
+    Serial.println("=== HOMING TEST ===");
+}
+
+void loop()
+{
+    bool prox = digitalRead(PIN_PROX) == LOW;
+
+    switch(state)
+    {
+
+        case State::RETRACT:
+
+            motor.setDirection(false);
+            motor.setDuty(HOMING_PWM);
+
+            if(prox)
+            {
+                Serial.println("Prox triggered → Backoff");
+                state = State::BACKOFF;
+            }
+
+            break;
+
+
+        case State::BACKOFF:
+
+            motor.setDirection(true);
+            motor.setDuty(HOMING_BACKOFF_PWM);
+
+            if(!prox)
+            {
+                Serial.println("Prox released → HOMED");
+                motor.setDuty(0);
+                state = State::DONE;
+            }
+
+            break;
+
+
+        case State::DONE:
+
+            motor.setDuty(0);
+
+            break;
+    }
+
+    delay(5);
+}
