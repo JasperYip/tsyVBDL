@@ -34,6 +34,7 @@ public:
         float duty;
         State state;
         float target_mm;
+        bool homing_failed;
     };
 
     void configurePID(const PIDController::Config& cfg);
@@ -54,4 +55,6 @@ private:
     float target_mm_ = 10.0f;
 
     bool homing_backoff_ = false;
+
+    float homing_timer_s_ = 0.0f;
 };

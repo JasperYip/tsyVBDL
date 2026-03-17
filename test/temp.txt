@@ -1,0 +1,73 @@
+#include <Arduino.h>
+#include "config/pin_map.hpp"
+#include "utils/logger.hpp"
+#include "drivers/motor_driver.hpp"
+
+static MotorDriver motor({
+  .pin_pwm = PIN_MOTOR_PWM,
+  .pin_dir = PIN_MOTOR_DIR,
+  .pin_slp = PIN_MOTOR_SLP,
+  .pin_flt = PIN_MOTOR_FLT,
+  .pin_cs  = PIN_MOTOR_CS,
+
+  .pwm_freq_hz = 25000.0f,
+  .pwm_max = 255,
+
+  .flt_active_low = true,
+
+  .cs_volts_per_amp = 0.04f,
+  .adc_ref_volts = 3.3f,
+  .adc_bits = 12
+});
+
+void setup() {
+
+  logger::begin(115200);
+  LOGI("Motor + Encoder motion test");
+
+  // IMPORTANT: enable pullups explicitly
+  pinMode(PIN_ENC_A, INPUT_PULLUP);
+  pinMode(PIN_ENC_B, INPUT_PULLUP);
+
+  motor.begin();
+  motor.enable();
+
+  motor.setDirection(MotorDriver::Direction::EXTEND);
+
+  LOGI("Starting slow motion test...");
+
+  // Slow motor movement
+  motor.setPWM(40);
+
+  pinMode(LED_BUILTIN, OUTPUT);
+}
+
+void loop() {
+
+  // Safety check
+  if (motor.faultActive()) {
+    motor.stop();
+    LOGE(F("MOTOR FAULT ACTIVE! PWM stopped."));
+    while (1);
+  }
+
+  // --- RAW ENCODER OBSERVATION ---
+  static uint8_t last = 0xFF;
+
+  uint8_t a = digitalReadFast(PIN_ENC_A);
+  uint8_t b = digitalReadFast(PIN_ENC_B);
+
+  uint8_t state = (a << 1) | b;
+
+  if (state != last) {
+    Serial.print("state=");
+    Serial.print(state);
+    Serial.print(" (A=");
+    Serial.print(a);
+    Serial.print(" B=");
+    Serial.print(b);
+    Serial.println(")");
+
+    last = state;
+  }
+}

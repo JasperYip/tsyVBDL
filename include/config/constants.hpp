@@ -134,13 +134,14 @@ constexpr float CAN_POS_SCALE = 10.0f;
    SAFETY PLACEHOLDERS
 ---------------------------------------------------------- */
 
-constexpr float MAX_MOTOR_CURRENT_A = 15.0f;
-
-constexpr int16_t MAX_PACK_TEMP_C = 60;
-
-constexpr uint16_t MIN_PACK_VOLTAGE_MV = 18000;
-constexpr uint16_t MAX_PACK_VOLTAGE_MV = 30000;
-
+constexpr float OVERCURRENT_HARD_LIMIT_A = 6.0f;
+constexpr float OVERCURRENT_CONFIRM_S = 0.10f;
+constexpr float STALL_CURRENT_A = 3.0f;
+constexpr float STALL_MIN_DUTY = 0.25f;
+constexpr float STALL_POS_EPS_MM = 0.10f;
+constexpr float STALL_CONFIRM_S = 0.50f;
+constexpr float BMS_TEMP_CONFIRM_S = 1.0f;
+constexpr float HOMING_TIMEOUT_S = 60.0f;
 
 // command timeout
 constexpr uint32_t CMD_TIMEOUT_SMALL_MS = 300;

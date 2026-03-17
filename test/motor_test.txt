@@ -30,10 +30,24 @@ void setup() {
   motor.enable();
   motor.setDirection(MotorDriver::Direction::EXTEND);
   LOGI(F("Motor enabled, direction=EXTEND"));
+
+  pinMode(LED_BUILTIN, OUTPUT);
 }
 
 void loop() {
   // If fault, stop immediately
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(500);
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(500);
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(500);
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(500);
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(500);
+  digitalWrite(LED_BUILTIN, LOW);
+  
   if (motor.faultActive()) {
     motor.stop();
     LOGE(F("MOTOR FAULT ACTIVE! PWM stopped."));
@@ -42,33 +56,61 @@ void loop() {
   }
 
   // Ramp up then down
-  for (int pwm = 0; pwm <= 120; pwm += 10) {
+  for (int pwm = 0; pwm <= 255; pwm += 5) {
     motor.setPWM((uint16_t)pwm);
     Serial.print("pwm=");
     Serial.print(pwm);
     Serial.print("  I(A)=");
     Serial.print(motor.readCurrentA(), 2);
+    Serial.print("  dir=");
+    Serial.print("Extend");
     Serial.print("  flt=");
     Serial.println(motor.faultActive() ? 1 : 0);
-    delay(300);
+    delay(200);
   }
-
+  delay(10000);
+  for (int pwm = 255; pwm >= 0; pwm -= 5) {
+    motor.setPWM((uint16_t)pwm);
+    Serial.print("pwm=");
+    Serial.print(pwm);
+    Serial.print("  I(A)=");
+    Serial.print(motor.readCurrentA(), 2);
+    Serial.print("  dir=");
+    Serial.print("Extend");
+    Serial.print("  flt=");
+    Serial.println(motor.faultActive() ? 1 : 0);
+    delay(200);
+  }
   motor.stop();
   delay(1000);
 
   // Reverse and do it again
   motor.setDirection(MotorDriver::Direction::RETRACT);
-  for (int pwm = 0; pwm <= 120; pwm += 10) {
+  for (int pwm = 0; pwm <= 255; pwm += 5) {
     motor.setPWM((uint16_t)pwm);
     Serial.print("pwm=");
     Serial.print(pwm);
     Serial.print("  I(A)=");
     Serial.print(motor.readCurrentA(), 2);
+    Serial.print("  dir=");
+    Serial.print("Retract");
     Serial.print("  flt=");
     Serial.println(motor.faultActive() ? 1 : 0);
-    delay(300);
+    delay(200);
   }
-
+  delay(10000);
+  for (int pwm = 255; pwm >= 0; pwm -= 5) {
+    motor.setPWM((uint16_t)pwm);
+    Serial.print("pwm=");
+    Serial.print(pwm);
+    Serial.print("  I(A)=");
+    Serial.print(motor.readCurrentA(), 2);
+    Serial.print("  dir=");
+    Serial.print("Retract");
+    Serial.print("  flt=");
+    Serial.println(motor.faultActive() ? 1 : 0);
+    delay(200);
+  }
   motor.stop();
   delay(1500);
 

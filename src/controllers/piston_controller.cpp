@@ -12,6 +12,7 @@ void PistonController::reset()
 {
     state_ = State::UNHOMED;
     pid_.reset();
+    homing_timer_s_ = 0.0f;
 }
 
 float PistonController::percentToMm(float pct) const
@@ -41,6 +42,7 @@ PistonController::update(const Inputs& in, float dt)
     Output out{};
     out.state = state_;
     out.target_mm = target_mm_;
+    out.homing_failed = false;
 
     if (in.hard_fault) {
         state_ = State::FAULT;
@@ -55,10 +57,21 @@ PistonController::update(const Inputs& in, float dt)
         {
             state_ = State::HOMING;
             homing_backoff_ = false;
+            homing_timer_s_ = 0.0f;
         }
         break;
 
     case State::HOMING:
+
+        homing_timer_s_ += dt;
+
+        if (homing_timer_s_ > config::HOMING_TIMEOUT_S)
+        {
+            out.homing_failed = true;
+            state_ = State::FAULT;
+            out.duty = 0.0f;
+            break;
+        }
 
         if (!homing_backoff_)
         {
@@ -84,6 +97,7 @@ PistonController::update(const Inputs& in, float dt)
                 pid_.reset();
                 target_mm_ = config::STROKE_HARD_MIN_MM;
                 state_ = State::RUN;
+                homing_timer_s_ = 0.0f;
             }
         }
 
