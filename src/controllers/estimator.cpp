@@ -82,3 +82,8 @@ float Estimator::velocityMmPerSec() const
 {
     return vel_est_mm_s_;
 }
+
+void Estimator::syncEncoder(int32_t encoder_count) {
+    last_encoder_count_ = encoder_count;
+    encoder_initialized_ = true;
+}

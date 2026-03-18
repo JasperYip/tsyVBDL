@@ -22,11 +22,14 @@ public:
     };
 
     Estimator() = default;
+    explicit Estimator(const Config& cfg) : cfg_(cfg) {}
 
     void configure(const Config& cfg);
 
     void reset();
     void setPositionMm(float pos_mm);
+
+    void syncEncoder(int32_t encoder_count);
 
     Output update(int32_t encoder_count,
                   bool tof_valid_hw,

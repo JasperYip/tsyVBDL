@@ -90,7 +90,7 @@ PistonController::update(const Inputs& in, float dt)
             if (in.prox_triggered)
             {
                 out.dir_extend = true;
-                out.duty = config::HOMING_BACKOFF_PWM;
+                out.duty = config::HOMING_BACKOFF_DUTY;
             }
             else
             {

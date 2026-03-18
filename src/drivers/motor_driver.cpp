@@ -45,7 +45,7 @@ void MotorDriver::disable() {
 
 void MotorDriver::setDirection(Direction dir) {
   dir_ = dir;
-  digitalWrite(cfg_.pin_dir, (dir_ == Direction::RETRACT) ? HIGH : LOW);
+  digitalWrite(cfg_.pin_dir, (dir_ == Direction::EXTEND) ? HIGH : LOW);
 }
 
 void MotorDriver::setPWM(uint16_t pwm) {

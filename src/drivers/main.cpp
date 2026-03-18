@@ -1,146 +1,72 @@
 #include <Arduino.h>
+#include <drivers/enc_alt.hpp>
 #include "config/pin_map.hpp"
 #include "config/constants.hpp"
-#include "utils/logger.hpp"
-#include "drivers/encoder.hpp"
 #include "drivers/motor_driver.hpp"
 
-// --- Encoder ---
-static EncoderDriver enc({
+// --- Encoder (uses config like your main system) ---
+EncoderAlt encoder({
+  .channel = 2,  // ⚠️ still must be set (Teensy hardware requirement)
+
   .pin_a = PIN_ENC_A,
   .pin_b = PIN_ENC_B,
-  .pin_z = PIN_ENC_Z,
 
   .counts_per_rev = config::COUNTS_PER_SCREW_REV,
   .lead_screw_pitch_mm = config::LEAD_SCREW_MM_PER_REV
 });
 
 // --- Motor ---
-static MotorDriver motor({
+MotorDriver motor({
   .pin_pwm = PIN_MOTOR_PWM,
   .pin_dir = PIN_MOTOR_DIR,
   .pin_slp = PIN_MOTOR_SLP,
   .pin_flt = PIN_MOTOR_FLT,
   .pin_cs  = PIN_MOTOR_CS,
 
-  .pwm_freq_hz = 25000.0f,
+  .pwm_freq_hz = config::PWM_FREQ_HZ,
   .pwm_max = 255,
 
   .flt_active_low = true,
 
-  .cs_volts_per_amp = 0.04f,
+  .cs_volts_per_amp = config::CURRENT_SENSE_V_PER_A,
   .adc_ref_volts = 3.3f,
   .adc_bits = 12
 });
 
-enum class Phase {
-  RAMP_UP,
-  HOLD,
-  RAMP_DOWN
-};
-
-Phase phase = Phase::RAMP_UP;
-
-int pwm = 0;
-const int PWM_MAX = 240;     // 🔧 tune this
-const int PWM_STEP = 1;
-
-bool forward = true;
-
-uint32_t lastUpdate = 0;
-uint32_t phaseStart = 0;
-uint32_t lastPrint = 0;
-
 void setup() {
-  logger::begin(115200);
-  LOGI("Trapezoidal Motion Test");
+  Serial.begin(115200);
+  delay(1000);
 
-  enc.begin();
-  enc.writeCounts(0);
+  Serial.println("=== MOTOR + ENCODER TEST (CONFIG-BASED) ===");
+
+  encoder.begin();
+  encoder.writeCounts(0);
 
   motor.begin();
   motor.enable();
 
   motor.setDirection(MotorDriver::Direction::EXTEND);
 
-  phaseStart = millis();
+  // Spin motor slowly
+  motor.setPWM(10);
+
+  Serial.println("Motor spinning at PWM=10");
 }
 
 void loop() {
-  enc.update();
+  static uint32_t lastPrint = 0;
 
-  // Safety
-  if (motor.faultActive()) {
-    motor.stop();
-    LOGE("MOTOR FAULT!");
-    while (1);
-  }
+  if (millis() - lastPrint > 200) {
+    lastPrint = millis();
 
-  uint32_t now = millis();
+    int32_t counts = encoder.readCounts();
+    float pos = encoder.readPositionMm();
 
-  // --- MOTION PROFILE ---
-  if (now - lastUpdate >= 10) {
-    lastUpdate = now;
+    Serial.print("Counts: ");
+    Serial.print(counts);
 
-    switch (phase) {
-
-      case Phase::RAMP_UP:
-        pwm += PWM_STEP;
-        if (pwm >= PWM_MAX) {
-          pwm = PWM_MAX;
-          phase = Phase::HOLD;
-          phaseStart = now;
-        }
-        break;
-
-      case Phase::HOLD:
-        // hold max speed for a bit
-        if (now - phaseStart > 1500) {   // 🔧 hold time (ms)
-          phase = Phase::RAMP_DOWN;
-        }
-        break;
-
-      case Phase::RAMP_DOWN:
-        pwm -= PWM_STEP;
-        if (pwm <= 0) {
-          pwm = 0;
-
-          // 🔁 switch direction
-          forward = !forward;
-          motor.setDirection(
-            forward ? MotorDriver::Direction::EXTEND
-                    : MotorDriver::Direction::RETRACT
-          );
-
-          phase = Phase::RAMP_UP;
-        }
-        break;
-    }
-
-    motor.setPWM(pwm);
-  }
-
-  // --- DEBUG PRINT ---
-  if (now - lastPrint >= 100) {
-    lastPrint = now;
-
-    Serial.print("pwm=");
-    Serial.print(pwm);
-
-    Serial.print("  dir=");
-    Serial.print(forward ? "F" : "B");
-
-    Serial.print("  phase=");
-    Serial.print(
-      phase == Phase::RAMP_UP ? "UP" :
-      phase == Phase::HOLD ? "HOLD" : "DOWN"
-    );
-
-    Serial.print("  counts=");
-    Serial.print(enc.readCounts());
-
-    Serial.print("  mm=");
-    Serial.print(enc.readPositionMm(), 4);
+    Serial.print(" | Pos(mm): ");
+    Serial.print(pos, 4);
 
     Serial.println();
   }

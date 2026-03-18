@@ -28,7 +28,11 @@ private:
     Config cfg_;
 
     volatile int32_t count_ = 0;
-    uint8_t last_state_ = 0;
+    volatile uint8_t last_state_ = 0;
+
+    // --- NEW ---
+    static EncoderDriver* instance_;
+    static void isrHandler();
 
     inline uint8_t readState_() const;
     float countsToMm_(int32_t counts) const;

@@ -65,8 +65,11 @@ constexpr float POS_TOL_MM = 1.0f;   // enter hold mode
 constexpr float DRIFT_RESTART_MM = 2.0f;   // restart PID
 
 constexpr float HOMING_PWM = 0.20f;          // slow homing
-constexpr float HOMING_BACKOFF_PWM = 0.10f;  //even slower correction
+constexpr float HOMING_BACKOFF_DUTY = 0.10f;  //even slower correction
 constexpr float SOFT_ZONE_MAX_DUTY = 0.30f;   // slower in soft zone
+constexpr float MIN_DUTY = 0.10f; // ~8%
+
+
 /* ----------------------------------------------------------
    PID GAINS
 ---------------------------------------------------------- */
@@ -119,7 +122,7 @@ constexpr float MM_PER_COUNT =
 ---------------------------------------------------------- */
 
 // Motor driver current sense gain
-constexpr float CURRENT_SENSE_MV_PER_A = 40.0f;
+constexpr float CURRENT_SENSE_V_PER_A = 0.04f;
 
 
 /* ----------------------------------------------------------

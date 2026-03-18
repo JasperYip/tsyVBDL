@@ -17,21 +17,29 @@ controllers receive stable, well-defined measurements.
 class ToFSensor {
 public:
   struct Reading {
-    bool      fresh;      // true if new good reading this call
-    bool      valid;      // true if passed status + range checks
-    uint16_t  mm;         // new mm if fresh+valid, else last_valid_mm_
-    uint8_t   status;     // raw status from sensor
+    bool      fresh;
+    bool      valid;
+    uint16_t  mm;
+    uint8_t   status;
   };
+
+  // ✅ Constructor stores pins
+  ToFSensor(int sda_pin, int scl_pin)
+    : sda_pin_(sda_pin), scl_pin_(scl_pin) {}
 
   bool begin(TwoWire& wire = Wire1);
 
-  // Optional: allow changing minimum valid range (default 10mm)
   void setMinValidMm(uint16_t mm) { min_valid_mm_ = mm; }
 
   Reading read();
 
 private:
+  int sda_pin_;
+  int scl_pin_;
+
   bool inited_ = false;
   uint16_t last_valid_mm_ = 0;
-  uint16_t min_valid_mm_  = 8;   // << added
+  uint16_t min_valid_mm_  = 8;
+
+  float offset_mm_ = 0.0f; // private correction
 };

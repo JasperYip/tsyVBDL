@@ -4,6 +4,9 @@
 static Adafruit_VL6180X g_vl;
 
 bool ToFSensor::begin(TwoWire& wire) {
+  wire.setSDA(sda_pin_);
+  wire.setSCL(scl_pin_);
+  
   wire.begin();
   wire.setClock(400000);
 
@@ -37,11 +40,17 @@ ToFSensor::Reading ToFSensor::read() {
 
     // Accept only if status OK AND above your minimum reliable floor
     if (status == 0 && mm >= min_valid_mm_) {
+      const float corrected = static_cast<float>(mm) + offset_mm_;
+
+      // Prevent negative values after correction
+      const uint16_t corrected_mm = (corrected < 0.0f) ? 0 : static_cast<uint16_t>(corrected);
+
       out.valid = true;
       out.fresh = true;
-      out.mm = mm;
+      out.mm = corrected_mm;
       out.status = status;
-      last_valid_mm_ = mm;
+
+      last_valid_mm_ = corrected_mm;
       return out;
     }
   }

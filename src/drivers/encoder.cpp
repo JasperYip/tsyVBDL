@@ -1,5 +1,7 @@
 #include "drivers/encoder.hpp"
 
+EncoderDriver* EncoderDriver::instance_ = nullptr;
+
 EncoderDriver::EncoderDriver(const Config& cfg)
 : cfg_(cfg) {}
 
@@ -11,45 +13,57 @@ void EncoderDriver::begin() {
         pinMode(cfg_.pin_z, INPUT_PULLUP);
     }
 
+    instance_ = this;
+
     last_state_ = readState_();
     count_ = 0;
+
+    attachInterrupt(digitalPinToInterrupt(cfg_.pin_a), isrHandler, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(cfg_.pin_b), isrHandler, CHANGE);
 }
 
 inline uint8_t EncoderDriver::readState_() const {
-    return (digitalReadFast(cfg_.pin_a) << 1) |
-            digitalReadFast(cfg_.pin_b);
+    return (digitalRead(cfg_.pin_a) << 1) |
+            digitalRead(cfg_.pin_b);
 }
 
-void EncoderDriver::update() {
-    uint8_t s = readState_();
+void EncoderDriver::isrHandler() {
+    if (!instance_) return;
 
-    if (s == last_state_) return;
+    EncoderDriver* self = instance_;
 
-    // Based on your observed sequence:
-    // 3 → 2 → 0 → 1 → 3 (reverse direction)
+    uint8_t s =
+        (digitalRead(self->cfg_.pin_a) << 1) |
+         digitalRead(self->cfg_.pin_b);
 
+    if (s == self->last_state_) return;
+
+    // --- YOUR ORIGINAL LOGIC (UNCHANGED) ---
     if (
-        (last_state_ == 3 && s == 2) ||
-        (last_state_ == 2 && s == 0) ||
-        (last_state_ == 0 && s == 1) ||
-        (last_state_ == 1 && s == 3)
+        (self->last_state_ == 3 && s == 2) ||
+        (self->last_state_ == 2 && s == 0) ||
+        (self->last_state_ == 0 && s == 1) ||
+        (self->last_state_ == 1 && s == 3)
     ) {
-        count_++;
+        self->count_--;
     }
     else if (
-        (last_state_ == 3 && s == 1) ||
-        (last_state_ == 1 && s == 0) ||
-        (last_state_ == 0 && s == 2) ||
-        (last_state_ == 2 && s == 3)
+        (self->last_state_ == 3 && s == 1) ||
+        (self->last_state_ == 1 && s == 0) ||
+        (self->last_state_ == 0 && s == 2) ||
+        (self->last_state_ == 2 && s == 3)
     ) {
-        count_--;
+        self->count_++;
     }
 
-    last_state_ = s;
+    self->last_state_ = s;
 }
 
 int32_t EncoderDriver::readCounts() const {
-    return count_;
+    noInterrupts();
+    int32_t c = count_;
+    interrupts();
+    return c;
 }
 
 void EncoderDriver::writeCounts(int32_t value) {
@@ -57,6 +71,7 @@ void EncoderDriver::writeCounts(int32_t value) {
     count_ = value;
     interrupts();
 }
+
 
 float EncoderDriver::countsToMm_(int32_t counts) const {
     if (cfg_.counts_per_rev == 0) return 0.0f;
