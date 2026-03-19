@@ -2,17 +2,19 @@
 #include "config/pin_map.hpp"
 #include "config/constants.hpp"
 #include "utils/logger.hpp"
-#include "drivers/encoder.hpp"
+#include "drivers/enc_alt.hpp"
 #include "drivers/motor_driver.hpp"
 #include "controllers/estimator.hpp"
 #include "controllers/pid_controller.hpp"
 #include "drivers/tof_sensor.hpp"
 
 // --- Encoder ---
-static EncoderDriver enc({
+static EncoderAlt enc({
+  .channel = 2,
+
   .pin_a = PIN_ENC_A,
   .pin_b = PIN_ENC_B,
-  .pin_z = PIN_ENC_Z,
+
   .counts_per_rev = config::COUNTS_PER_SCREW_REV,
   .lead_screw_pitch_mm = config::LEAD_SCREW_MM_PER_REV
 });
@@ -55,7 +57,7 @@ enum class ControlMode {
 ControlMode mode = ControlMode::MANUAL;
 
 int pwm = 0;
-const int PWM_MAX = 240;
+const int PWM_MAX = 255;
 
 bool forward = true;
 
@@ -68,7 +70,8 @@ const uint32_t CONTROL_INTERVAL_MS = 2; // 500Hz
 Estimator::Output lastEst{};
 
 // --- Control state ---
-float target_mm = config::STROKE_HARD_MIN_MM;
+float target_mm_cmd = config::STROKE_HARD_MIN_MM;
+float target_mm = target_mm_cmd;       // filtered target
 float target_percent = 0.0f;
 
 bool homed = false;
@@ -173,6 +176,7 @@ void handleCommand(String cmd) {
 
     mode = ControlMode::AUTO;
     target_mm = lastEst.pos_est_mm;
+    target_mm_cmd = target_mm;
     pid.reset();
     holding = false;
 
@@ -186,12 +190,12 @@ void handleCommand(String cmd) {
 
     float pct = cmd.substring(1).toFloat();
     target_percent = constrain(pct, 0.0f, 100.0f);
-    target_mm = percentToMm(target_percent);
+    target_mm_cmd = percentToMm(target_percent);
 
     Serial.print("Target: ");
     Serial.print(target_percent);
     Serial.print("% -> ");
-    Serial.println(target_mm);
+    Serial.println(target_mm_cmd);
   }
   else if (cmd.startsWith("p")) {
     if (mode == ControlMode::AUTO) return;
@@ -216,10 +220,10 @@ void handleCommand(String cmd) {
   else if (cmd == "z") {
     float pos = lastEst.pos_est_mm;
 
-    if (fabs(pos - 10.0f) > 2.0f) {
-      Serial.println("ERROR: Not near 10mm");
-      return;
-    }
+    // if (fabs(pos - 10.0f) > 2.0f) {
+    //   Serial.println("ERROR: Not near 10mm");
+    //   return;
+    // }
 
     float home_mm = 10.0f;
     int32_t home_counts = roundf(home_mm / config::MM_PER_COUNT);
@@ -257,7 +261,9 @@ void setup() {
   logger::begin(115200);
 
   enc.begin();
+
   estimator.reset();
+  estimator.syncEncoder(enc.readCounts());  // IMPORTANT
 
   tof.begin(Wire1);
 
@@ -281,34 +287,67 @@ void setup() {
 void loop() {
   uint32_t now = millis();
 
-  float dt = (lastEstimatorUpdate == 0) ? 0.0f :
-             (now - lastEstimatorUpdate) / 1000.0f;
-  lastEstimatorUpdate = now;
+  // -----------------------------
+  // Time delta (shared)
+  // -----------------------------
+  static uint32_t lastTime = 0;
+  float dt = (lastTime == 0) ? 0.0f :
+             (now - lastTime) / 1000.0f;
+  lastTime = now;
 
+  // -----------------------------
+  // Read encoder (fast path)
+  // -----------------------------
+  int32_t counts = enc.readCounts();
+
+  // -----------------------------
+  // Read ToF (slow / optional)
+  // -----------------------------
   auto tof_reading = tof.read();
 
+  bool tof_valid = tof_reading.valid && tof_reading.fresh;
+
+  // -----------------------------
+  // Estimator (runs EVERY loop)
+  // -----------------------------
   lastEst = estimator.update(
-    enc.readCounts(),
-    tof_reading.valid && tof_reading.fresh,
+    counts,
+    false,          // fuse only if valid (tof_valid)
     tof_reading.mm,
     dt
   );
 
+  // -----------------------------
+  // Serial
+  // -----------------------------
   readSerialCommands();
 
+  // -----------------------------
+  // Safety
+  // -----------------------------
   if (motor.faultActive()) {
     motor.stop();
     while (1);
   }
 
-  // --- AUTO CONTROL ---
-  if (mode == ControlMode::AUTO &&
-      (now - lastControlUpdate >= CONTROL_INTERVAL_MS)) {
-
-    lastControlUpdate = now;
+  // -----------------------------
+  // AUTO CONTROL (runs EVERY loop)
+  // -----------------------------
+  if (mode == ControlMode::AUTO) {
 
     float pos = lastEst.pos_est_mm;
     float vel = lastEst.vel_est_mm_s;
+
+    // --- target smoothing ---
+    float max_step = 40.0f * dt;  // mm/s limit (tune this)
+
+    float delta = target_mm_cmd - target_mm;
+
+    if (fabs(delta) > max_step) {
+      target_mm += (delta > 0 ? max_step : -max_step);
+    } else {
+      target_mm = target_mm_cmd;
+    }
 
     target_mm = constrain(target_mm,
                           config::STROKE_HARD_MIN_MM,
@@ -316,6 +355,7 @@ void loop() {
 
     float error = target_mm - pos;
 
+    // --- Holding logic ---
     if (holding) {
       if (fabs(error) > config::DRIFT_RESTART_MM) {
         holding = false;
@@ -325,14 +365,23 @@ void loop() {
       }
     }
 
-    if (fabs(error) <= config::POS_TOL_MM) {
+    // --- improved stop condition ---
+    bool near_target = fabs(error) <= config::POS_TOL_MM;
+    bool slow = fabs(vel) < 0.5f;  // tighter threshold
+
+    // check if we are NOT still moving toward the target
+    bool not_pushing_toward_target =
+      (error > 0 && vel <= 0) ||   // target ahead, but not moving toward it
+      (error < 0 && vel >= 0);     // target behind, but not moving toward it
+
+    if (near_target && slow && not_pushing_toward_target) {
       motor.setPWM(0);
       holding = true;
       return;
     }
 
-    float effort = pid.update(target_mm, pos, vel,
-                              config::CONTROL_DT_S);
+    // --- PID ---
+    float effort = pid.update(target_mm, pos, vel, dt);
 
     bool dir = (effort > 0);
     motor.setDirection(dir ?
@@ -353,7 +402,9 @@ void loop() {
     motor.setPWM(pwm);
   }
 
-  // --- STATUS ---
+  // -----------------------------
+  // STATUS (slow)
+  // -----------------------------
   if (now - lastPrint >= 1000) {
     lastPrint = now;
     printStatus(lastEst);

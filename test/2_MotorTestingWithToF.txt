@@ -2,16 +2,17 @@
 #include "config/pin_map.hpp"
 #include "config/constants.hpp"
 #include "utils/logger.hpp"
-#include "drivers/encoder.hpp"
+#include "drivers/enc_alt.hpp"
 #include "drivers/motor_driver.hpp"
 #include "controllers/estimator.hpp"
 #include "drivers/tof_sensor.hpp"
 
 // --- Encoder ---
-static EncoderDriver enc({
+static EncoderAlt enc({
+  .channel = 2,
+
   .pin_a = PIN_ENC_A,
   .pin_b = PIN_ENC_B,
-  .pin_z = PIN_ENC_Z,
 
   .counts_per_rev = config::COUNTS_PER_SCREW_REV,
   .lead_screw_pitch_mm = config::LEAD_SCREW_MM_PER_REV
@@ -275,8 +276,8 @@ void loop() {
   // --- Estimator update ---
   lastEst = estimator.update(
     enc.readCounts(),
-    tof_valid,
-    tof_mm,
+    false,     //enable = tof_valid
+    tof_mm,    //enable = tof_mm
     dt
   );
 

@@ -1,73 +1,63 @@
 #include <Arduino.h>
-#include <drivers/enc_alt.hpp>
+#include "utils/logger.hpp"
+#include "drivers/can_bus.hpp"
 #include "config/pin_map.hpp"
-#include "config/constants.hpp"
-#include "drivers/motor_driver.hpp"
 
-// --- Encoder (uses config like your main system) ---
-EncoderAlt encoder({
-  .channel = 2,  // ⚠️ still must be set (Teensy hardware requirement)
+// sends 2Hz heartbeat and print anything received
 
-  .pin_a = PIN_ENC_A,
-  .pin_b = PIN_ENC_B,
+static CanBus canbus;
 
-  .counts_per_rev = config::COUNTS_PER_SCREW_REV,
-  .lead_screw_pitch_mm = config::LEAD_SCREW_MM_PER_REV
-});
-
-// --- Motor ---
-MotorDriver motor({
-  .pin_pwm = PIN_MOTOR_PWM,
-  .pin_dir = PIN_MOTOR_DIR,
-  .pin_slp = PIN_MOTOR_SLP,
-  .pin_flt = PIN_MOTOR_FLT,
-  .pin_cs  = PIN_MOTOR_CS,
-
-  .pwm_freq_hz = config::PWM_FREQ_HZ,
-  .pwm_max = 255,
-
-  .flt_active_low = true,
-
-  .cs_volts_per_amp = config::CURRENT_SENSE_V_PER_A,
-  .adc_ref_volts = 3.3f,
-  .adc_bits = 12
-});
+static uint8_t seq = 0;
+static uint32_t last_tx_ms = 0;
 
 void setup() {
-  Serial.begin(115200);
-  delay(1000);
+  // Force motor asleep in case something is wired wrong during bus testing
+  pinMode(PIN_MOTOR_SLP, OUTPUT);
+  digitalWrite(PIN_MOTOR_SLP, LOW);
+  pinMode(PIN_MOTOR_PWM, OUTPUT);
+  analogWrite(PIN_MOTOR_PWM, 0);
 
-  Serial.println("=== MOTOR + ENCODER TEST (CONFIG-BASED) ===");
+  logger::begin(115200);
+  LOGI(F("CAN2 smoke test"));
 
-  encoder.begin();
-  encoder.writeCounts(0);
-
-  motor.begin();
-  motor.enable();
-
-  motor.setDirection(MotorDriver::Direction::EXTEND);
-
-  // Spin motor slowly
-  motor.setPWM(10);
-
-  Serial.println("Motor spinning at PWM=10");
+  // Typical CAN bitrates: 250k, 500k, 1M. Use whatever your Pi uses.
+  canbus.begin(500000);
+  LOGI(F("CAN started at 500k"));
 }
 
 void loop() {
-  static uint32_t lastPrint = 0;
+  // TX heartbeat at 2 Hz
+  const uint32_t now = millis();
+  if (now - last_tx_ms >= 500) {
+    last_tx_ms = now;
 
-  if (millis() - lastPrint > 200) {
-    lastPrint = millis();
+    CanFrame f;
+    f.id = 0x700; // temporary test ID
+    f.len = 2;
+    f.data[0] = 0xA5;
+    f.data[1] = seq++;
+    canbus.write(f);
 
-    int32_t counts = encoder.readCounts();
-    float pos = encoder.readPositionMm();
+    Serial.print("TX id=0x");
+    Serial.print(f.id, HEX);
+    Serial.print(" data=");
+    Serial.print(f.data[0], HEX);
+    Serial.print(" ");
+    Serial.println(f.data[1], HEX);
+  }
 
-    Serial.print("Counts: ");
-    Serial.print(counts);
-
-    Serial.print(" | Pos(mm): ");
-    Serial.print(pos, 4);
-
+  // RX print
+  CanFrame r;
+  while (canbus.read(r)) {
+    Serial.print("RX id=0x");
+    Serial.print(r.id, HEX);
+    Serial.print(" len=");
+    Serial.print(r.len);
+    Serial.print(" data=");
+    for (uint8_t i = 0; i < r.len; i++) {
+      Serial.print(r.data[i], HEX);
+      if (i + 1 < r.len) Serial.print(" ");
+    }
     Serial.println();
   }
 }

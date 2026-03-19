@@ -48,11 +48,11 @@ constexpr float STROKE_REAL_MAX_MM = 150.0f;
 
 // usable control range
 constexpr float STROKE_HARD_MIN_MM = 10.0f;
-constexpr float STROKE_HARD_MAX_MM = 140.0f;
+constexpr float STROKE_HARD_MAX_MM = 145.0f;
 
 // soft zones
 constexpr float STROKE_SOFT_START_MM = 20.0f;
-constexpr float STROKE_SOFT_END_MM   = 130.0f;
+constexpr float STROKE_SOFT_END_MM   = 135.0f;
 
 // stroke span
 constexpr float STROKE_SPAN_MM = STROKE_HARD_MAX_MM - STROKE_HARD_MIN_MM;
@@ -65,17 +65,17 @@ constexpr float POS_TOL_MM = 1.0f;   // enter hold mode
 constexpr float DRIFT_RESTART_MM = 2.0f;   // restart PID
 
 constexpr float HOMING_PWM = 0.20f;          // slow homing
-constexpr float HOMING_BACKOFF_DUTY = 0.10f;  //even slower correction
-constexpr float SOFT_ZONE_MAX_DUTY = 0.30f;   // slower in soft zone
-constexpr float MIN_DUTY = 0.10f; // ~8%
+constexpr float HOMING_BACKOFF_DUTY = 0.20f;  //even slower correction
+constexpr float SOFT_ZONE_MAX_DUTY = 0.50f;   // slower in soft zone
+constexpr float MIN_DUTY = 0.20f; // ~8%
 
 
 /* ----------------------------------------------------------
    PID GAINS
 ---------------------------------------------------------- */
-constexpr float PID_KP = 0.02f;
+constexpr float PID_KP = 0.10f;
 constexpr float PID_KI = 0.0f;
-constexpr float PID_KD = 0.002f;
+constexpr float PID_KD = 0.003f;
 
 constexpr float PID_I_LIMIT = 5.0f;
 constexpr float PID_OUT_LIMIT = 1.0f;

@@ -221,7 +221,6 @@ void setup() {
 // Main loop
 // -----------------------------
 void loop() {
-  enc.update();
   readSerialCommands();
 
   // Safety
