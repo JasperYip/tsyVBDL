@@ -12,9 +12,7 @@
 #include "protocols/can_messages.hpp"
 
 // --- CAN ---
-CanFrame lastFrame{};
-bool hasLastFrame = false;
-constexpr uint8_t CAN_NODE_ID = config::NODE_ID_LEFT;
+constexpr uint8_t CAN_NODE_ID = config::NODE_ID_RIGHT;
 static CanBus canBus;
 uint8_t canSequence = 0;
 uint32_t lastCanTx = 0;
@@ -93,31 +91,13 @@ bool holding = false;
 // Serial buffer
 String cmdBuffer;
 
-// CAN timeout
+// Can timeout
 uint32_t lastCanRx = 0;
-const uint32_t CAN_TIMEOUT_MS = 5000;
-
-// LED
-uint32_t lastLedToggle = 0;
-bool ledOn = false;
+const uint32_t CAN_TIMEOUT_MS = 500;
 
 // -----------------------------
 // Helpers
 // -----------------------------
-bool isFrameDifferentIgnoreSeq(const CanFrame& a, const CanFrame& b, int seqIndex)
-{
-  if (a.id != b.id) return true;
-  if (a.len != b.len) return true;
-
-  for (uint8_t i = 0; i < a.len; i++) {
-    if (i == seqIndex) continue; // 👈 ignore sequence byte
-
-    if (a.data[i] != b.data[i]) return true;
-  }
-
-  return false;
-}
-
 float percentToMm(float percent)
 {
   percent = constrain(percent, 0.0f, 100.0f);
@@ -293,8 +273,6 @@ void handleCommand(String cmd) {
 
     mode = ControlMode::CAN;
 
-    lastCanRx = millis();
-
     target_mm = lastEst.pos_est_mm;
     target_mm_cmd = target_mm;
 
@@ -324,24 +302,17 @@ void handleCan()
 
   while (canBus.read(frame)) {
 
-    //🔍 DEBUG PRINT (add this)
-    constexpr int SEQ_INDEX = 6;
-    if (!hasLastFrame || isFrameDifferentIgnoreSeq(frame, lastFrame, SEQ_INDEX)) {
-
-      Serial.print("RX id=0x");
-      Serial.print(frame.id, HEX);
-      Serial.print(" len=");
-      Serial.print(frame.len);
-      Serial.print(" data=");
-      for (uint8_t i = 0; i < frame.len; i++) {
-        Serial.print(frame.data[i]);
-        Serial.print(" ");
-      }
-      Serial.println();
-
-      lastFrame = frame;
-      hasLastFrame = true;
+    // 🔍 DEBUG PRINT (add this)
+    Serial.print("RX id=0x");
+    Serial.print(frame.id, HEX);
+    Serial.print(" len=");
+    Serial.print(frame.len);
+    Serial.print(" data=");
+    for (uint8_t i = 0; i < frame.len; i++) {
+      Serial.print(frame.data[i], HEX);
+      Serial.print(" ");
     }
+    Serial.println();
     
     if (frame.id == can::CMD_SETPOINT_BASE + CAN_NODE_ID) {
 
@@ -435,9 +406,6 @@ void setup() {
   Serial.begin(115200);
   logger::begin(115200);
 
-  pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, LOW);
-
   enc.begin();
 
   estimator.reset();
@@ -466,19 +434,6 @@ void setup() {
 // -----------------------------
 void loop() {
   uint32_t now = millis();
-
-  // -----------------------------
-  // LED toggle
-  // -----------------------------
-  if (!ledOn && (now - lastLedToggle >= 5000)) {
-    digitalWrite(LED_BUILTIN, HIGH);
-    ledOn = true;
-    lastLedToggle = now;
-  }
-  if (ledOn && (now - lastLedToggle >= 100)) {
-    digitalWrite(LED_BUILTIN, LOW);
-    ledOn = false;
-  }
 
   // -----------------------------
   // Time delta (shared)

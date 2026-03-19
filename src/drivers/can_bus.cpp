@@ -4,15 +4,18 @@
 // Use CAN2 with moderate queue sizes
 static FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> g_can;
 
-bool CanBus::begin(uint32_t bitrate) {
+bool CanBus::begin(uint32_t bitrate, uint8_t rxPin, uint8_t txPin) {
+  (void)rxPin;
+  (void)txPin;
+
   g_can.begin();
   g_can.setBaudRate(bitrate);
 
   // Optional: reject/accept filters later (Phase 2)
   // For now, accept all frames.
   g_can.setMaxMB(16);
-  g_can.enableFIFO();
-  g_can.enableFIFOInterrupt();
+  //g_can.enableFIFO();
+  //g_can.enableFIFOInterrupt();
 
   started_ = true;
   return true;

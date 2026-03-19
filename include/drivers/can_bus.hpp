@@ -23,7 +23,7 @@ struct CanFrame {
 class CanBus {
 public:
   // CAN2 is fixed for this project
-  bool begin(uint32_t bitrate);
+  bool begin(uint32_t bitrate, uint8_t rxPin, uint8_t txPin);
 
   bool write(const CanFrame& f);
   bool read(CanFrame& out);
