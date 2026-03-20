@@ -22,6 +22,13 @@ const uint32_t CAN_TX_INTERVAL_MS = 20; // 50Hz
 float lastTofMm = 0.0f;
 bool lastDirectionExtend = true;
 
+struct FrameCache {
+  bool valid;
+  CanFrame frame;
+};
+
+FrameCache lastFrames[2048]; // enough for 11-bit IDs
+
 // --- Encoder ---
 static EncoderAlt enc({
   .channel = 2,
@@ -331,21 +338,24 @@ void handleCan()
 
     //🔍 DEBUG PRINT (add this)
     constexpr int SEQ_INDEX = 6;
-    if (!hasLastFrame || isFrameDifferentIgnoreSeq(frame, lastFrame, SEQ_INDEX)) {
+    uint16_t id = frame.id & 0x7FF; // standard ID
+    if (!lastFrames[id].valid ||
+        isFrameDifferentIgnoreSeq(frame, lastFrames[id].frame, SEQ_INDEX)) {
 
       Serial.print("RX id=0x");
       Serial.print(frame.id, HEX);
       Serial.print(" len=");
       Serial.print(frame.len);
       Serial.print(" data=");
+
       for (uint8_t i = 0; i < frame.len; i++) {
         Serial.print(frame.data[i]);
         Serial.print(" ");
       }
       Serial.println();
 
-      lastFrame = frame;
-      hasLastFrame = true;
+      lastFrames[id].frame = frame;
+      lastFrames[id].valid = true;
     }
     
     if (frame.id == can::CMD_SETPOINT_BASE + CAN_NODE_ID) {
@@ -632,7 +642,7 @@ void loop() {
   // -----------------------------
   // STATUS (slow)
   // -----------------------------
-  if (now - lastPrint >= 1000) {
+  if (now - lastPrint >= 2000) {
     lastPrint = now;
     printStatus(lastEst);
   }
