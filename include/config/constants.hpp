@@ -61,7 +61,7 @@ constexpr float STROKE_SPAN_MM = STROKE_HARD_MAX_MM - STROKE_HARD_MIN_MM;
    POSITION CONTROL
 ---------------------------------------------------------- */
 
-constexpr float POS_TOL_MM = 1.0f;   // enter hold mode
+constexpr float POS_TOL_MM = 0.1f;   // enter hold mode
 constexpr float DRIFT_RESTART_MM = 2.0f;   // restart PID
 
 constexpr float HOMING_PWM = 0.20f;          // slow homing

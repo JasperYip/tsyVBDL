@@ -82,6 +82,8 @@ const uint32_t CONTROL_INTERVAL_MS = 2; // 500Hz
 
 Estimator::Output lastEst{};
 
+float lastTofRawMm = 0.0f;
+
 // --- Control state ---
 float target_mm_cmd = config::STROKE_HARD_MIN_MM;
 float target_mm = target_mm_cmd;       // filtered target
@@ -181,6 +183,9 @@ void printStatus(const Estimator::Output& est) {
   
   Serial.print("  mm=");
   Serial.print(est.pos_est_mm, 3);
+
+  Serial.print("  tof=");
+  Serial.print(lastTofMm, 1);
 
   Serial.print("  target=");
   Serial.print(target_mm, 2);
@@ -498,6 +503,8 @@ void loop() {
   // -----------------------------
   auto tof_reading = tof.read();
 
+  lastTofRawMm = tof_reading.mm;
+
   bool tof_valid = tof_reading.valid && tof_reading.fresh;
 
   if (tof_valid) {
@@ -583,15 +590,10 @@ void loop() {
 
     // --- improved stop condition ---
     bool near_target = fabs(error) <= config::POS_TOL_MM;
-    bool slow = fabs(vel) < 0.5f;  // tighter threshold
 
-    // check if we are NOT still moving toward the target
-    bool not_pushing_toward_target =
-      (error > 0 && vel <= 0) ||   // target ahead, but not moving toward it
-      (error < 0 && vel >= 0);     // target behind, but not moving toward it
-
-    if (near_target && slow && not_pushing_toward_target) {
+    if (near_target) {
       motor.setPWM(0);
+      pwm = 0;
       holding = true;
       return;
     }
