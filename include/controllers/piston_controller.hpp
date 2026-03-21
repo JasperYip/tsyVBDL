@@ -1,7 +1,6 @@
 #pragma once
 
 #include "controllers/pid_controller.hpp"
-#include "controllers/estimator.hpp"
 
 class PistonController {
 public:
@@ -12,6 +11,27 @@ public:
         RUN,
         HOLD,
         FAULT
+    };
+
+    // -----------------------------
+    // CONFIG (injected from main)
+    // -----------------------------
+    struct Config {
+        float stroke_min_mm;
+        float stroke_max_mm;
+
+        float soft_start_mm;
+        float soft_end_mm;
+        float soft_zone_max_duty;
+
+        float min_duty;
+
+        float pos_tol_mm;
+        float drift_restart_mm;
+
+        float homing_pwm;
+        float homing_backoff_duty;
+        float homing_timeout_s;
     };
 
     struct Inputs {
@@ -37,6 +57,7 @@ public:
         bool homing_failed;
     };
 
+    void configure(const Config& cfg);
     void configurePID(const PIDController::Config& cfg);
 
     void reset();
@@ -46,13 +67,15 @@ public:
 private:
 
     float percentToMm(float pct) const;
-    float applySoftZone(float duty, float pos_mm) const;
+    float applySoftZone(float pos_mm) const;
+
+    Config cfg_{};
 
     PIDController pid_;
 
     State state_ = State::UNHOMED;
 
-    float target_mm_ = 10.0f;
+    float target_mm_ = 0.0f;
 
     bool homing_backoff_ = false;
 

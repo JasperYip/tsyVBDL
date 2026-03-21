@@ -1,160 +1,229 @@
 #include "controllers/piston_controller.hpp"
-#include "config/constants.hpp"
 #include <algorithm>
 #include <cmath>
 
+// -----------------------------
+// CONFIG
+// -----------------------------
+void PistonController::configure(const Config& cfg)
+{
+    cfg_ = cfg;
+}
+
+// -----------------------------
+// PID
+// -----------------------------
 void PistonController::configurePID(const PIDController::Config& cfg)
 {
     pid_.configure(cfg);
 }
 
+// -----------------------------
+// RESET
+// -----------------------------
 void PistonController::reset()
 {
     state_ = State::UNHOMED;
     pid_.reset();
     homing_timer_s_ = 0.0f;
+    homing_backoff_ = false;
+    target_mm_ = cfg_.stroke_min_mm;
 }
 
+// -----------------------------
+// UTIL
+// -----------------------------
 float PistonController::percentToMm(float pct) const
 {
     pct = std::clamp(pct, 0.0f, 100.0f);
 
-    return config::STROKE_HARD_MIN_MM +
-           (pct / 100.0f) * config::STROKE_SPAN_MM;
+    return cfg_.stroke_min_mm +
+           (pct / 100.0f) *
+           (cfg_.stroke_max_mm - cfg_.stroke_min_mm);
 }
 
-float PistonController::applySoftZone(float duty, float pos_mm) const
+float PistonController::applySoftZone(float pos_mm) const
 {
-    float limit = 1.0f;
+    if (pos_mm <= cfg_.soft_start_mm) {
+        float t = (pos_mm - cfg_.stroke_min_mm) /
+                  (cfg_.soft_start_mm - cfg_.stroke_min_mm);
 
-    if (pos_mm < config::STROKE_SOFT_END_MM)
-        limit = config::SOFT_ZONE_MAX_DUTY;
+        t = std::clamp(t, 0.0f, 1.0f);
 
-    if (pos_mm > config::STROKE_SOFT_START_MM)
-        limit = config::SOFT_ZONE_MAX_DUTY;
+        return cfg_.soft_zone_max_duty +
+               t * (1.0f - cfg_.soft_zone_max_duty);
+    }
 
-    return std::clamp(duty, -limit, limit);
+    if (pos_mm >= cfg_.soft_end_mm) {
+        float t = (cfg_.stroke_max_mm - pos_mm) /
+                  (cfg_.stroke_max_mm - cfg_.soft_end_mm);
+
+        t = std::clamp(t, 0.0f, 1.0f);
+
+        return cfg_.soft_zone_max_duty +
+               t * (1.0f - cfg_.soft_zone_max_duty);
+    }
+
+    return 1.0f;
 }
 
+// -----------------------------
+// MAIN UPDATE
+// -----------------------------
 PistonController::Output
 PistonController::update(const Inputs& in, float dt)
 {
     Output out{};
-    out.state = state_;
-    out.target_mm = target_mm_;
     out.homing_failed = false;
 
+    // safe defaults
+    out.duty = 0.0f;
+    out.dir_extend = true;
+
+    // -----------------------------
+    // HARD FAULT (latched)
+    // -----------------------------
     if (in.hard_fault) {
         state_ = State::FAULT;
     }
 
+    if (state_ == State::FAULT) {
+        out.state = state_;
+        out.target_mm = target_mm_;
+        return out;
+    }
+
+    // -----------------------------
+    // DISABLE → UNHOMED
+    // -----------------------------
+    if (!in.cmd_enable) {
+        state_ = State::UNHOMED;
+
+        pid_.reset();
+        homing_timer_s_ = 0.0f;
+        homing_backoff_ = false;
+
+        target_mm_ = cfg_.stroke_min_mm;
+
+        out.state = state_;
+        out.target_mm = target_mm_;
+        return out;
+    }
+
+    // -----------------------------
+    // STATE MACHINE
+    // -----------------------------
     switch (state_) {
 
     case State::UNHOMED:
-        out.duty = 0.0f;
-
-        if (in.cmd_home)
-        {
+        if (in.cmd_home) {
             state_ = State::HOMING;
             homing_backoff_ = false;
             homing_timer_s_ = 0.0f;
         }
         break;
 
+    // -----------------------------
+    // HOMING
+    // -----------------------------
     case State::HOMING:
 
         homing_timer_s_ += dt;
 
-        if (homing_timer_s_ > config::HOMING_TIMEOUT_S)
-        {
-            out.homing_failed = true;
+        if (homing_timer_s_ > cfg_.homing_timeout_s) {
             state_ = State::FAULT;
-            out.duty = 0.0f;
+            out.homing_failed = true;
             break;
         }
 
-        if (!homing_backoff_)
-        {
-            if (!in.prox_triggered)
-            {
+        // Phase 1: retract
+        if (!homing_backoff_) {
+
+            if (!in.prox_triggered) {
                 out.dir_extend = false;
-                out.duty = config::HOMING_PWM;
-            }
-            else
-            {
+                out.duty = cfg_.homing_pwm;
+            } else {
                 homing_backoff_ = true;
             }
         }
-        else
-        {
-            if (in.prox_triggered)
-            {
+        // Phase 2: forward
+        else {
+
+            if (in.prox_triggered) {
                 out.dir_extend = true;
-                out.duty = config::HOMING_BACKOFF_DUTY;
-            }
-            else
-            {
+                out.duty = cfg_.homing_backoff_duty;
+            } else {
+                // homing complete
                 pid_.reset();
-                target_mm_ = config::STROKE_HARD_MIN_MM;
-                state_ = State::RUN;
+                target_mm_ = cfg_.stroke_min_mm;
+
                 homing_timer_s_ = 0.0f;
+                homing_backoff_ = false;
+
+                state_ = State::HOLD;
             }
         }
 
         break;
 
+    // -----------------------------
+    // RUN
+    // -----------------------------
     case State::RUN:
+    {
+        target_mm_ = percentToMm(in.target_percent);
 
-        if (!in.cmd_enable)
-        {
+        float error = target_mm_ - in.pos_est_mm;
+
+        if (std::fabs(error) <= cfg_.pos_tol_mm) {
             state_ = State::HOLD;
             break;
         }
 
-        target_mm_ = percentToMm(in.target_percent);
+        float effort = pid_.update(
+            target_mm_,
+            in.pos_est_mm,
+            in.vel_est_mm_s,
+            dt
+        );
 
-        {
-            float error = target_mm_ - in.pos_est_mm;
+        out.dir_extend = effort > 0.0f;
 
-            if (std::fabs(error) < config::POS_TOL_MM)
-            {
-                state_ = State::HOLD;
-                break;
-            }
+        float duty = std::fabs(effort);
 
-            float effort =
-                pid_.update(target_mm_,
-                            in.pos_est_mm,
-                            in.vel_est_mm_s,
-                            dt);
+        // soft zone scaling
+        duty *= applySoftZone(in.pos_est_mm);
 
-            effort = applySoftZone(effort, in.pos_est_mm);
-
-            out.dir_extend = effort > 0.0f;
-            out.duty = std::fabs(effort);
+        // min duty AFTER scaling (ensures torque)
+        if (duty > 0.0f) {
+            duty = cfg_.min_duty +
+                   (1.0f - cfg_.min_duty) * duty;
         }
 
-        break;
+        out.duty = std::clamp(duty, 0.0f, 1.0f);
 
+        break;
+    }
+
+    // -----------------------------
+    // HOLD (includes READY)
+    // -----------------------------
     case State::HOLD:
+    {
+        float commanded_target_mm = percentToMm(in.target_percent);
+        float error = commanded_target_mm - in.pos_est_mm;
 
-        out.duty = 0.0f;
+        target_mm_ = commanded_target_mm;
 
-        if (in.cmd_enable)
-        {
-            float error = target_mm_ - in.pos_est_mm;
-
-            if (std::fabs(error) > config::DRIFT_RESTART_MM)
-            {
-                state_ = State::RUN;
-            }
+        if (std::fabs(error) > cfg_.drift_restart_mm) {
+            pid_.reset();
+            state_ = State::RUN;
         }
 
         break;
+    }
 
     case State::FAULT:
-
-        out.duty = 0.0f;
         break;
     }
 
