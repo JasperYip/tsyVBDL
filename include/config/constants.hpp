@@ -138,13 +138,17 @@ constexpr float CAN_POS_SCALE = 10.0f;
 ---------------------------------------------------------- */
 
 constexpr float OVERCURRENT_HARD_LIMIT_A = 6.0f;
-constexpr float OVERCURRENT_CONFIRM_S = 0.10f;
+constexpr float OVERCURRENT_CONFIRM_S = 0.50f;
 constexpr float STALL_CURRENT_A = 3.0f;
 constexpr float STALL_MIN_DUTY = 0.25f;
 constexpr float STALL_POS_EPS_MM = 0.10f;
-constexpr float STALL_CONFIRM_S = 0.50f;
-constexpr float BMS_TEMP_CONFIRM_S = 1.0f;
+constexpr float STALL_CONFIRM_S = 2.0f;
+constexpr float BMS_TEMP_CONFIRM_S = 2.0f;
 constexpr float HOMING_TIMEOUT_S = 60.0f;
+
+// debounce
+constexpr float LEAK_DEBOUNCE_S = 0.05f;
+constexpr float DRIVER_FAULT_DEBOUNCE_S = 0.02f;
 
 // command timeout
 constexpr uint32_t CMD_TIMEOUT_SMALL_MS = 300;

@@ -57,7 +57,7 @@ enum HardFaultA : uint8_t
     FAULT_OVERCURRENT   = 1 << 2,
     FAULT_STALL         = 1 << 3,
     FAULT_CMD_TO_L      = 1 << 4,
-    FAULT_NOT_HOMED     = 1 << 5,
+    FAULT_HOMING_FAILED = 1 << 5,
     FAULT_POS_LIMIT     = 1 << 6,
     FAULT_BMS_TEMP      = 1 << 7
 };
