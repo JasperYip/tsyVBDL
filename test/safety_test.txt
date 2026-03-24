@@ -22,18 +22,31 @@ void assertTrue(bool condition, const char* msg)
 }
 
 // --------------------------------------------------
+// INPUT HELPER
+// --------------------------------------------------
+SafetyManager::Inputs makeNominalInputs()
+{
+    SafetyManager::Inputs in{};
+
+    in.tof_valid = true;     // critical
+    in.pos_est_mm = 50.0f;   // safe in-range position
+
+    return in;
+}
+
+// --------------------------------------------------
 // TEST: Leak triggers hard fault (with debounce)
 // --------------------------------------------------
 void test_leak()
 {
     safety.reset();
 
-    SafetyManager::Inputs in{};
+    auto in = makeNominalInputs();
     in.leak_raw = true;
 
     SafetyManager::Output out{};
 
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 10; i++) {
         out = safety.update(in, 0.01f);
     }
 
@@ -49,7 +62,7 @@ void test_overcurrent()
 {
     safety.reset();
 
-    SafetyManager::Inputs in{};
+    auto in = makeNominalInputs();
     in.motor_current_a = config::OVERCURRENT_HARD_LIMIT_A + 1.0f;
 
     SafetyManager::Output out{};
@@ -74,7 +87,7 @@ void test_soft_fault()
 {
     safety.reset();
 
-    SafetyManager::Inputs in{};
+    auto in = makeNominalInputs();
     in.cmd_timeout_small = true;
 
     auto out = safety.update(in, 0.01f);
@@ -92,17 +105,21 @@ void test_latch()
 {
     safety.reset();
 
-    SafetyManager::Inputs in{};
+    auto in = makeNominalInputs();
     in.leak_raw = true;
 
     auto out = safety.update(in, 0.01f);
-    out = safety.update(in, 0.01f);
+    for (int i = 0; i < 10; i++) {
+        out = safety.update(in, 0.01f);
+    }
 
     assertTrue(out.hard_fault, "Hard fault triggered");
 
     // remove condition
     in.leak_raw = false;
-    out = safety.update(in, 0.01f);
+    for (int i = 0; i < 10; i++) {
+        out = safety.update(in, 0.01f);
+    }
 
     assertTrue(out.hard_fault, "Hard fault latched");
 }
@@ -114,7 +131,7 @@ void test_position_limit()
 {
     safety.reset();
 
-    SafetyManager::Inputs in{};
+    auto in = makeNominalInputs();
     in.pos_est_mm = 200.0f; // outside 150mm
 
     auto out = safety.update(in, 0.01f);
@@ -130,7 +147,7 @@ void test_stall()
 {
     safety.reset();
 
-    SafetyManager::Inputs in{};
+    auto in = makeNominalInputs();
     in.motor_enabled = true;
     in.motor_duty = config::STALL_MIN_DUTY + 0.1f;
     in.motor_current_a = config::STALL_CURRENT_A + 1.0f;

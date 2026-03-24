@@ -37,6 +37,9 @@ public:
   // CRC16 (TinyBMS uses CRC-16-IBM typically)
   static uint16_t crc16(const uint8_t* data, uint16_t len);
 
+  // Test-only helper: inject raw bytes into RX ring as if they came from UART.
+  void injectTestRx(const uint8_t* data, uint16_t len);
+
 private:
   Config cfg_;
 

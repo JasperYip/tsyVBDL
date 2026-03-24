@@ -2,6 +2,24 @@
 
 #include <stdint.h>
 
+/*
+In your real `main.cpp`, the **SafetyManager sits between sensors/drivers 
+and the controllers** as the single source of truth for system health. 
+Each control cycle (ideally at your fixed 1 kHz loop), you gather all raw 
+inputs—leak sensor, motor fault pin, motor current, estimator position, 
+ToF validity, command/BMS timeouts, etc.—and pass them into 
+`safety.update(in, dt)`. The returned output provides `hard_fault`, 
+`soft_fault`, and fault bitfields; **you do not let controllers decide 
+faults anymore**. The piston controller receives `hard_fault` 
+(and optionally `soft_fault`) as inputs, and if `hard_fault` is true, 
+the main loop immediately forces the motor to a safe state 
+(PWM = 0, disable driver) and keeps it there since faults are latched. 
+Separately, the same SafetyManager output is used to populate and transmit 
+the `STATUS_FAULT (0x050)` CAN message. In short: **drivers → 
+SafetyManager → controller + CAN + motor override**, ensuring all safety 
+decisions are centralized, deterministic, and consistent.
+*/
+
 namespace can {
 enum HardFaultA : uint8_t;
 enum HardFaultB : uint8_t;

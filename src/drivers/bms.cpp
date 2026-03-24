@@ -58,3 +58,19 @@ uint16_t BmsUart::crc16(const uint8_t* data, uint16_t len) {
   }
   return crc;
 }
+
+void BmsUart::injectTestRx(const uint8_t* data, uint16_t len) {
+  if (!data || len == 0) return;
+
+  for (uint16_t i = 0; i < len; i++) {
+    buffer_[head_] = data[i];
+    head_ = (head_ + 1) % INTERNAL_BUF_SIZE;
+
+    // Same overflow handling as update()
+    if (head_ == tail_) {
+      tail_ = (tail_ + 1) % INTERNAL_BUF_SIZE;
+    }
+  }
+
+  frame_ready_ = true;
+}
