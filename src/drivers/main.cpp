@@ -1,254 +1,649 @@
 #include <Arduino.h>
-#include <cmath>
-#include <cstring>
-
-#include "config/constants.hpp"
+#include <stdint.h>
 #include "config/pin_map.hpp"
-#include "controllers/bms_manager.hpp"
-#include "drivers/bms.hpp"
+#include "config/constants.hpp"
+#include "utils/logger.hpp"
+#include "drivers/enc_alt.hpp"
+#include "drivers/motor_driver.hpp"
+#include "controllers/estimator.hpp"
+#include "controllers/pid_controller.hpp"
+#include "drivers/tof_sensor.hpp"
+#include "drivers/can_bus.hpp"
+#include "protocols/can_messages.hpp"
 
-// --------------------------------------------------
-// Test transport + manager
-// --------------------------------------------------
-static BmsUart bmsUart({
-    .serial = &Serial2,
-    .baud = BMS_BAUD
+// --- CAN ---
+CanFrame lastFrame{};
+bool hasLastFrame = false;
+constexpr uint8_t CAN_NODE_ID = config::NODE_ID_LEFT;
+static CanBus canBus;
+uint8_t canSequence = 0;
+uint32_t lastCanTx = 0;
+const uint32_t CAN_TX_INTERVAL_MS = 20; // 50Hz
+float lastTofMm = 0.0f;
+bool lastDirectionExtend = true;
+
+struct FrameCache {
+  bool valid;
+  CanFrame frame;
+};
+
+FrameCache lastFrames[2048]; // enough for 11-bit IDs
+
+// --- Encoder ---
+static EncoderAlt enc({
+  .channel = 2,
+
+  .pin_a = PIN_ENC_A,
+  .pin_b = PIN_ENC_B,
+
+  .counts_per_rev = config::COUNTS_PER_SCREW_REV,
+  .lead_screw_pitch_mm = config::LEAD_SCREW_MM_PER_REV
 });
 
-static BmsManager bms({
-    .transport = &bmsUart,
-    .poll_interval_ms = 20,
-    .response_timeout_ms = 40,
-    .max_retries = 0,
-    .fault_confirm_ms = 2000,
-    .timeout_small_ms = config::BMS_TIMEOUT_SMALL_MS,
-    .timeout_large_ms = config::BMS_TIMEOUT_LARGE_MS
+// --- Motor ---
+static MotorDriver motor({
+  .pin_pwm = PIN_MOTOR_PWM,
+  .pin_dir = PIN_MOTOR_DIR,
+  .pin_slp = PIN_MOTOR_SLP,
+  .pin_flt = PIN_MOTOR_FLT,
+  .pin_cs  = PIN_MOTOR_CS,
+  .pwm_freq_hz = 25000.0f,
+  .pwm_max = 255,
+  .flt_active_low = true,
+  .cs_volts_per_amp = 0.04f,
+  .adc_ref_volts = 3.3f,
+  .adc_bits = 12
 });
 
-static uint32_t g_now_ms = 0;
+// --- Estimator ---
+static Estimator estimator({
+  .mm_per_count      = config::MM_PER_COUNT,
+  .tof_gain          = config::TOF_FUSION_GAIN,
+  .recovery_gain     = config::SLIP_RECOVERY_GAIN,
+  .slip_detect_mm    = config::SLIP_DETECT_MM,
+  .tof_min_valid_mm  = config::TOF_MIN_VALID_MM
+});
 
-// --------------------------------------------------
-// Assert helpers
-// --------------------------------------------------
-void check(bool cond, const char* msg)
+// --- PID ---
+static PIDController pid;
+
+// --- ToF ---
+static ToFSensor tof(PIN_TOF_SDA, PIN_TOF_SCL);
+
+enum class ControlMode {
+  AUTO,
+  MANUAL,
+  CAN
+};
+
+ControlMode mode = ControlMode::MANUAL;
+
+int pwm = 0;
+const int PWM_MAX = 255;
+
+uint32_t lastEstimatorUpdate = 0;
+uint32_t lastControlUpdate = 0;
+uint32_t lastPrint = 0;
+
+const uint32_t CONTROL_INTERVAL_MS = 2; // 500Hz
+
+Estimator::Output lastEst{};
+
+float lastTofRawMm = 0.0f;
+
+// --- Control state ---
+float target_mm_cmd = config::STROKE_HARD_MIN_MM;
+float target_mm = target_mm_cmd;       // filtered target
+float target_percent = 0.0f;
+
+bool homed = false;
+bool holding = false;
+
+// Serial buffer
+String cmdBuffer;
+
+// CAN timeout
+uint32_t lastCanRx = 0;
+const uint32_t CAN_TIMEOUT_MS = 5000;
+
+// LED
+uint32_t lastLedToggle = 0;
+bool ledOn = false;
+
+// -----------------------------
+// Helpers
+// -----------------------------
+bool isFrameDifferentIgnoreSeq(const CanFrame& a, const CanFrame& b, int seqIndex)
 {
-    Serial.print(cond ? "[PASS] " : "[FAIL] ");
-    Serial.println(msg);
+  if (a.id != b.id) return true;
+  if (a.len != b.len) return true;
+
+  for (uint8_t i = 0; i < a.len; i++) {
+    if (i == seqIndex) continue; // 👈 ignore sequence byte
+
+    if (a.data[i] != b.data[i]) return true;
+  }
+
+  return false;
 }
 
-bool approx(float a, float b, float eps = 0.05f)
+float percentToMm(float percent)
 {
-    return fabsf(a - b) <= eps;
+  percent = constrain(percent, 0.0f, 100.0f);
+
+  return config::STROKE_HARD_MIN_MM +
+         (percent / 100.0f) * config::STROKE_SPAN_MM;
 }
 
-// --------------------------------------------------
-// Time + manager step helpers
-// --------------------------------------------------
-void stepMs(uint32_t delta_ms)
+float computeSoftZoneScale(float pos_mm)
 {
-    const uint32_t end = g_now_ms + delta_ms;
-    while (g_now_ms < end) {
-        g_now_ms += 10;
-        bms.update(g_now_ms);
+  if (pos_mm <= config::STROKE_SOFT_START_MM) {
+    float t = (pos_mm - config::STROKE_HARD_MIN_MM) /
+              (config::STROKE_SOFT_START_MM - config::STROKE_HARD_MIN_MM);
+    t = constrain(t, 0.0f, 1.0f);
+
+    return config::SOFT_ZONE_MAX_DUTY +
+           t * (1.0f - config::SOFT_ZONE_MAX_DUTY);
+  }
+
+  if (pos_mm >= config::STROKE_SOFT_END_MM) {
+    float t = (config::STROKE_HARD_MAX_MM - pos_mm) /
+              (config::STROKE_HARD_MAX_MM - config::STROKE_SOFT_END_MM);
+    t = constrain(t, 0.0f, 1.0f);
+
+    return config::SOFT_ZONE_MAX_DUTY +
+           t * (1.0f - config::SOFT_ZONE_MAX_DUTY);
+  }
+
+  return 1.0f;
+}
+
+void printHelp() {
+  Serial.println("\n=== Commands ===");
+  Serial.println("m          -> manual mode");
+  Serial.println("a          -> auto mode");
+  Serial.println("%<num>     -> set target (AUTO only)");
+  Serial.println("p<num>     -> set PWM (manual)");
+  Serial.println("f / b      -> direction (manual)");
+  Serial.println("s          -> stop");
+  Serial.println("z          -> home (must be near 10mm)");
+  Serial.println("status     -> print status\n");
+}
+
+void printStatus(const Estimator::Output& est) {
+  float error = target_mm - est.pos_est_mm;
+
+  Serial.print("mode=");
+  switch (mode) {
+    case ControlMode::AUTO:
+      Serial.print("AUTO");
+      break;
+
+    case ControlMode::MANUAL:
+      Serial.print("MANUAL");
+      break;
+
+    case ControlMode::CAN:
+      Serial.print("CAN");
+      break;
+  }
+  
+  Serial.print("  mm=");
+  Serial.print(est.pos_est_mm, 3);
+
+  Serial.print("  tof=");
+  Serial.print(lastTofMm, 1);
+
+  Serial.print("  target=");
+  Serial.print(target_mm, 2);
+
+  Serial.print("  target%=");
+  Serial.print(target_percent, 1);
+
+  Serial.print("  err=");
+  Serial.print(error, 3);
+
+  Serial.print("  vel=");
+  Serial.print(est.vel_est_mm_s, 2);
+
+  Serial.print("  pwm=");
+  Serial.print(pwm);
+
+  Serial.print("  homed=");
+  Serial.print(homed ? "Y" : "N");
+
+  Serial.println();
+}
+
+// -----------------------------
+// Command handling
+// -----------------------------
+void handleCommand(String cmd) {
+  cmd.trim();
+  cmd.toLowerCase();
+
+  if (cmd == "m") {
+    mode = ControlMode::MANUAL;
+    motor.setPWM(0);
+    Serial.println("MANUAL mode");
+  }
+  else if (cmd == "a") {
+    if (!homed) {
+      Serial.println("ERROR: Not homed");
+      return;
     }
+
+    mode = ControlMode::AUTO;
+    target_mm = lastEst.pos_est_mm;
+    target_mm_cmd = target_mm;
+    pid.reset();
+    holding = false;
+
+    Serial.println("AUTO mode");
+  }
+  else if (cmd.startsWith("%")) {
+    if (mode != ControlMode::AUTO) {
+      Serial.println("ERROR: AUTO mode only");
+      return;
+    }
+
+    float pct = cmd.substring(1).toFloat();
+    target_percent = constrain(pct, 0.0f, 100.0f);
+    target_mm_cmd = percentToMm(target_percent);
+
+    Serial.print("Target: ");
+    Serial.print(target_percent);
+    Serial.print("% -> ");
+    Serial.println(target_mm_cmd);
+  }
+  else if (cmd.startsWith("p")) {
+    if (mode == ControlMode::AUTO) return;
+
+    pwm = constrain(cmd.substring(1).toInt(), 0, 255);
+    motor.setPWM(pwm);
+  }
+  else if (cmd == "f") {
+    if (mode == ControlMode::AUTO) return;
+    motor.setDirection(MotorDriver::Direction::EXTEND);
+    lastDirectionExtend = true;  
+  }
+  else if (cmd == "b") {
+    if (mode == ControlMode::AUTO) return;
+    motor.setDirection(MotorDriver::Direction::RETRACT);
+    lastDirectionExtend = false; 
+  }
+  else if (cmd == "s") {
+    pwm = 0;
+    motor.setPWM(0);
+  }
+  else if (cmd == "z") {
+    //float pos = lastEst.pos_est_mm;
+
+    // if (fabs(pos - 10.0f) > 2.0f) {
+    //   Serial.println("ERROR: Not near 10mm");
+    //   return;
+    // }
+
+    float home_mm = 10.0f;
+    int32_t home_counts = roundf(home_mm / config::MM_PER_COUNT);
+
+    enc.writeCounts(home_counts);
+    estimator.reset();
+    estimator.setPositionMm(home_mm);
+    estimator.syncEncoder(enc.readCounts());
+
+    pid.reset();
+    homed = true;
+
+    Serial.println("HOMED at 10mm");
+  }
+  else if (cmd == "c") {
+    if (!homed) {
+      Serial.println("ERROR: Not homed");
+      return;
+    }
+
+    mode = ControlMode::CAN;
+
+    lastCanRx = millis();
+
+    target_mm = lastEst.pos_est_mm;
+    target_mm_cmd = target_mm;
+
+    pid.reset();
+    holding = false;
+
+    Serial.println("CAN mode");
+  }
 }
 
-void injectAndUpdate(const uint8_t* frame, uint16_t len)
+void readSerialCommands() {
+  while (Serial.available()) {
+    char c = Serial.read();
+
+    if (c == '\n' || c == '\r') {
+      handleCommand(cmdBuffer);
+      cmdBuffer = "";
+    } else {
+      cmdBuffer += c;
+    }
+  }
+}
+
+void handleCan()
 {
-    bmsUart.injectTestRx(frame, len);
-    bms.update(g_now_ms);
+  CanFrame frame;
+
+  while (canBus.read(frame)) {
+
+    //🔍 DEBUG PRINT (add this)
+    constexpr int SEQ_INDEX = 6;
+    uint16_t id = frame.id & 0x7FF; // standard ID
+    if (!lastFrames[id].valid ||
+        isFrameDifferentIgnoreSeq(frame, lastFrames[id].frame, SEQ_INDEX)) {
+
+      Serial.print("RX id=0x");
+      Serial.print(frame.id, HEX);
+      Serial.print(" len=");
+      Serial.print(frame.len);
+      Serial.print(" data=");
+
+      for (uint8_t i = 0; i < frame.len; i++) {
+        Serial.print(frame.data[i]);
+        Serial.print(" ");
+      }
+      Serial.println();
+
+      lastFrames[id].frame = frame;
+      lastFrames[id].valid = true;
+    }
+    
+    if (frame.id == can::CMD_SETPOINT_BASE + CAN_NODE_ID) {
+
+      lastCanRx = millis();
+
+      can::CmdSetpoint msg;
+      can::unpackCmdSetpoint(frame.data, msg);
+
+      // Only apply CAN commands if we are in CAN mode
+      if (mode != ControlMode::CAN) {
+        continue;
+      }
+
+      if (!homed) {
+        continue;
+      }
+
+      // --- Apply setpoint ---
+      float pct = constrain(msg.stroke_percent, 0, 100);
+
+      static uint8_t last_pct = 255;
+
+      if (msg.stroke_percent != last_pct) {
+        pid.reset();
+        holding = false;
+        last_pct = msg.stroke_percent;
+      }
+
+      target_percent = pct;
+      target_mm_cmd = percentToMm(pct);
+    }
+  }
 }
 
-// --------------------------------------------------
-// TinyBMS frame builders (UART proprietary)
-// --------------------------------------------------
-uint16_t buildRespFloat(uint8_t cmd, float value, uint8_t* out)
+uint8_t buildControlFlags()
 {
-    out[0] = 0xAA;
-    out[1] = cmd;
-    memcpy(&out[2], &value, sizeof(float)); // LE on Teensy
+  uint8_t flags = 0;
 
-    const uint16_t crc = BmsUart::crc16(out, 6);
-    out[6] = (uint8_t)(crc & 0xFFu);
-    out[7] = (uint8_t)((crc >> 8) & 0xFFu);
-    return 8;
+  if (homed) flags |= can::FLAG_HOMED;
+
+  if (fabs(lastEst.vel_est_mm_s) > 0.5f)
+    flags |= can::FLAG_MOVING;
+
+  flags |= can::FLAG_MOTOR_EN;
+
+  if (lastDirectionExtend)
+    flags |= can::FLAG_DIR;
+
+  if (motor.faultActive())
+    flags |= can::FLAG_DRIVER_FLT;
+
+  return flags;
 }
 
-uint16_t buildRespU16(uint8_t cmd, uint16_t value, uint8_t* out)
+void sendStatusControl()
 {
-    out[0] = 0xAA;
-    out[1] = cmd;
-    out[2] = (uint8_t)(value & 0xFFu);
-    out[3] = (uint8_t)((value >> 8) & 0xFFu);
+  can::StatusControl msg{};
 
-    const uint16_t crc = BmsUart::crc16(out, 4);
-    out[4] = (uint8_t)(crc & 0xFFu);
-    out[5] = (uint8_t)((crc >> 8) & 0xFFu);
-    return 6;
+  msg.est_position_01mm =
+    (uint16_t)constrain(lastEst.pos_est_mm * 100.0f, 0, 65535);
+
+  msg.tof_position_mm =
+    (uint16_t)constrain(lastTofMm, 0, 65535);
+
+  msg.flags = buildControlFlags();
+
+  msg.pwm = (uint8_t)pwm;
+
+  msg.sequence = canSequence++;
+
+  float currentA = motor.readCurrentA();
+  msg.motor_current =
+    (int8_t)constrain(currentA * 10.0f, -127, 127); // 0.1A/LSB
+
+  uint8_t buf[8];
+  can::packStatusControl(buf, msg);
+
+  CanFrame frame;
+  frame.id = can::STATUS_CONTROL_BASE + CAN_NODE_ID;
+  frame.len = 8;
+
+  for (int i = 0; i < 8; i++) frame.data[i] = buf[i];
+
+  canBus.write(frame);
 }
 
-uint16_t buildRespTemps(int16_t internal_dC, int16_t ext1_dC, int16_t ext2_dC, uint8_t* out)
-{
-    out[0] = 0xAA;
-    out[1] = 0x1B;
-    out[2] = 6; // payload bytes
+// -----------------------------
+// Setup
+// -----------------------------
+void setup() {
+  Serial.begin(115200);
+  logger::begin(115200);
 
-    out[3] = (uint8_t)(internal_dC & 0xFF);
-    out[4] = (uint8_t)((internal_dC >> 8) & 0xFF);
-    out[5] = (uint8_t)(ext1_dC & 0xFF);
-    out[6] = (uint8_t)((ext1_dC >> 8) & 0xFF);
-    out[7] = (uint8_t)(ext2_dC & 0xFF);
-    out[8] = (uint8_t)((ext2_dC >> 8) & 0xFF);
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
 
-    const uint16_t crc = BmsUart::crc16(out, 9);
-    out[9]  = (uint8_t)(crc & 0xFFu);
-    out[10] = (uint8_t)((crc >> 8) & 0xFFu);
-    return 11;
+  enc.begin();
+
+  estimator.reset();
+  estimator.syncEncoder(enc.readCounts());  // IMPORTANT
+
+  tof.begin(Wire1);
+
+  motor.begin();
+  motor.enable();
+
+  pid.configure({
+    config::PID_KP,
+    config::PID_KI,
+    config::PID_KD,
+    config::PID_I_LIMIT,
+    config::PID_OUT_LIMIT
+  });
+
+  canBus.begin(500000, PIN_CAN_R, PIN_CAN_D); // or whatever your bus speed is
+
+  printHelp();
 }
 
-uint16_t buildRespNewestEvent(uint32_t bms_ts_s, uint32_t event_ts_s, uint8_t event_id, uint8_t* out)
-{
-    out[0] = 0xAA;
-    out[1] = 0x11;
-    out[2] = 8; // 4 bytes BTSP + 4 bytes one event entry
+// -----------------------------
+// Loop
+// -----------------------------
+void loop() {
+  uint32_t now = millis();
 
-    out[3] = (uint8_t)(bms_ts_s & 0xFFu);
-    out[4] = (uint8_t)((bms_ts_s >> 8) & 0xFFu);
-    out[5] = (uint8_t)((bms_ts_s >> 16) & 0xFFu);
-    out[6] = (uint8_t)((bms_ts_s >> 24) & 0xFFu);
+  // -----------------------------
+  // LED toggle
+  // -----------------------------
+  if (!ledOn && (now - lastLedToggle >= 5000)) {
+    digitalWrite(LED_BUILTIN, HIGH);
+    ledOn = true;
+    lastLedToggle = now;
+  }
+  if (ledOn && (now - lastLedToggle >= 100)) {
+    digitalWrite(LED_BUILTIN, LOW);
+    ledOn = false;
+  }
 
-    out[7]  = (uint8_t)(event_ts_s & 0xFFu);
-    out[8]  = (uint8_t)((event_ts_s >> 8) & 0xFFu);
-    out[9]  = (uint8_t)((event_ts_s >> 16) & 0xFFu);
-    out[10] = event_id;
+  // -----------------------------
+  // Time delta (shared)
+  // -----------------------------
+  static uint32_t lastTime = 0;
+  float dt = (lastTime == 0) ? 0.0f :
+             (now - lastTime) / 1000.0f;
+  lastTime = now;
 
-    const uint16_t crc = BmsUart::crc16(out, 11);
-    out[11] = (uint8_t)(crc & 0xFFu);
-    out[12] = (uint8_t)((crc >> 8) & 0xFFu);
-    return 13;
+  // -----------------------------
+  // Read encoder (fast path)
+  // -----------------------------
+  int32_t counts = enc.readCounts();
+
+  // -----------------------------
+  // Read ToF (slow / optional)
+  // -----------------------------
+  auto tof_reading = tof.read();
+
+  lastTofRawMm = tof_reading.mm;
+
+  bool tof_valid = tof_reading.valid && tof_reading.fresh;
+
+  if (tof_valid) {
+    lastTofMm = tof_reading.mm;
+  }
+
+  // -----------------------------
+  // Estimator (runs EVERY loop)
+  // -----------------------------
+  lastEst = estimator.update(
+    counts,
+    false,          // fuse only if valid (tof_valid)
+    tof_reading.mm,
+    dt
+  );
+
+  // -----------------------------
+  // Serial
+  // -----------------------------
+  readSerialCommands();
+
+  // -----------------------------
+  // CAN INPUT
+  // -----------------------------
+  handleCan();
+
+  // -----------------------------
+  // CAN TIMEOUT SAFETY
+  // -----------------------------
+  if (mode == ControlMode::CAN &&
+      (millis() - lastCanRx > CAN_TIMEOUT_MS)) {
+
+    motor.setPWM(0);
+    holding = false;
+
+    mode = ControlMode::MANUAL; // or FAULT later
+
+    Serial.println("CAN TIMEOUT");
+  }
+
+  // -----------------------------
+  // Safety
+  // -----------------------------
+  if (motor.faultActive()) {
+    motor.stop();
+    while (1);
+  }
+
+  // -----------------------------
+  // AUTO CONTROL (runs EVERY loop)
+  // -----------------------------
+  if (mode == ControlMode::AUTO || mode == ControlMode::CAN) {
+
+    float pos = lastEst.pos_est_mm;
+    float vel = lastEst.vel_est_mm_s;
+
+    // --- target smoothing ---
+    float max_step = 40.0f * dt;  // mm/s limit (tune this)
+
+    float delta = target_mm_cmd - target_mm;
+
+    if (fabs(delta) > max_step) {
+      target_mm += (delta > 0 ? max_step : -max_step);
+    } else {
+      target_mm = target_mm_cmd;
+    }
+
+    target_mm = constrain(target_mm,
+                          config::STROKE_HARD_MIN_MM,
+                          config::STROKE_HARD_MAX_MM);
+
+    float error = target_mm - pos;
+
+    // --- Holding logic ---
+    if (holding) {
+      if (fabs(error) > config::DRIFT_RESTART_MM) {
+        holding = false;
+      } else {
+        motor.setPWM(0);
+        return;
+      }
+    }
+
+    // --- improved stop condition ---
+    bool near_target = fabs(error) <= config::POS_TOL_MM;
+
+    if (near_target) {
+      motor.setPWM(0);
+      pwm = 0;
+      holding = true;
+      return;
+    }
+
+    // --- PID ---
+    float effort = pid.update(target_mm, pos, vel, dt);
+
+    bool dir = (effort > 0);
+    lastDirectionExtend = dir;
+    motor.setDirection(dir ?
+      MotorDriver::Direction::EXTEND :
+      MotorDriver::Direction::RETRACT);
+
+    float duty = fabs(effort);
+
+    if (duty > 0.0f) {
+      duty = config::MIN_DUTY +
+             (1.0f - config::MIN_DUTY) * duty;
+    }
+
+    duty *= computeSoftZoneScale(pos);
+    duty = constrain(duty, 0.0f, 1.0f);
+
+    pwm = duty * PWM_MAX;
+    motor.setPWM(pwm);
+  }
+
+  // -----------------------------
+  // CAN TX (50Hz)
+  // -----------------------------
+  if (now - lastCanTx >= CAN_TX_INTERVAL_MS) {
+    lastCanTx = now;
+    sendStatusControl();
+  }
+
+  // -----------------------------
+  // STATUS (slow)
+  // -----------------------------
+  if (now - lastPrint >= 2000) {
+    lastPrint = now;
+    printStatus(lastEst);
+  }
 }
-
-void injectEvent(uint32_t bms_ts_s, uint32_t event_ts_s, uint8_t event_id)
-{
-    uint8_t f[16];
-    const uint16_t n = buildRespNewestEvent(bms_ts_s, event_ts_s, event_id, f);
-    injectAndUpdate(f, n);
-}
-
-// --------------------------------------------------
-// Tests
-// --------------------------------------------------
-void testTelemetryDecode()
-{
-    uint8_t f[16];
-
-    injectAndUpdate(f, buildRespFloat(0x14, 51.2f, f));  // pack voltage
-    injectAndUpdate(f, buildRespFloat(0x15, -8.5f, f));  // pack current
-    injectAndUpdate(f, buildRespU16(0x16, 4210, f));     // max cell mV
-    injectAndUpdate(f, buildRespU16(0x17, 3310, f));     // min cell mV
-    injectAndUpdate(f, buildRespU16(0x18, 0x0093, f));   // discharging
-    injectAndUpdate(f, buildRespTemps(278, -32768, -32768, f)); // 27.8C
-    injectEvent(1000, 990, 0x61);                        // info: system started
-
-    const auto& t = bms.telemetry();
-    check(approx(t.pack_voltage_v, 51.2f), "Telemetry: pack voltage decode");
-    check(approx(t.pack_current_a, -8.5f), "Telemetry: pack current decode");
-    check(t.max_cell_mv == 4210, "Telemetry: max cell decode");
-    check(t.min_cell_mv == 3310, "Telemetry: min cell decode");
-    check(t.online_status == 0x0093, "Telemetry: online status decode");
-    check(t.pack_temp_dC == 278, "Telemetry: internal temp 0.1C decode");
-    check(t.full_snapshot_ready, "Telemetry: full snapshot ready");
-}
-
-void testRecoverableFaults2sConfirm()
-{
-    // Overtemperature fault appears, then recovers before 2s -> should stay false
-    injectEvent(1010, 1001, 0x04);   // over-temp fault
-    stepMs(1500);
-    check(!bms.flags().bms_temp_high, "Overtemp not yet confirmed at 1.5s");
-
-    injectEvent(1012, 1002, 0x73);   // recovered over-temp
-    stepMs(700);
-    check(!bms.flags().bms_temp_high, "Overtemp clears before 2s confirm");
-
-    // Overtemperature fault persists past 2s -> should become true
-    injectEvent(1020, 1003, 0x04);
-    stepMs(2100);
-    check(bms.flags().bms_temp_high, "Overtemp confirmed after 2s");
-
-    injectEvent(1025, 1004, 0x73);
-    stepMs(50);
-    check(!bms.flags().bms_temp_high, "Overtemp clear event resets flag");
-
-    // Overcurrent confirm / recover
-    injectEvent(1030, 1005, 0x05);   // discharge over-current
-    stepMs(2100);
-    check(bms.flags().bms_overcurrent, "Overcurrent confirmed after 2s");
-
-    injectEvent(1035, 1006, 0x77);   // recovered discharge OC
-    stepMs(50);
-    check(!bms.flags().bms_overcurrent, "Overcurrent recovery clears flag");
-
-    // Low/high voltage confirm / recover
-    injectEvent(1040, 1007, 0x02);   // under-voltage
-    injectEvent(1040, 1008, 0x03);   // over-voltage
-    stepMs(2100);
-    check(bms.flags().bms_low_voltage, "Low-voltage confirmed after 2s");
-    check(bms.flags().bms_high_voltage, "High-voltage confirmed after 2s");
-
-    injectEvent(1045, 1009, 0x7B);   // recovered under-voltage
-    injectEvent(1045, 1010, 0x79);   // recovered over-voltage
-    stepMs(50);
-    check(!bms.flags().bms_low_voltage, "Low-voltage recovery clears flag");
-    check(!bms.flags().bms_high_voltage, "High-voltage recovery clears flag");
-}
-
-void testSwitchFaultImmediate()
-{
-    injectEvent(1050, 1011, 0x0B); // charger switch error
-    check(bms.flags().bms_switch_fault, "Switch fault immediate on event");
-}
-
-void testTimeoutFlags()
-{
-    // Ensure we have a recent good RX timestamp first
-    injectEvent(1060, 1012, 0x61);
-
-    stepMs(config::BMS_TIMEOUT_SMALL_MS - 100);
-    check(!bms.flags().bms_timeout_small, "Timeout small not yet active");
-
-    stepMs(200);
-    check(bms.flags().bms_timeout_small, "Timeout small active");
-    check(!bms.flags().bms_timeout_large, "Timeout large not yet active");
-
-    stepMs(config::BMS_TIMEOUT_LARGE_MS - config::BMS_TIMEOUT_SMALL_MS + 100);
-    check(bms.flags().bms_timeout_large, "Timeout large active");
-}
-
-void runAllTests()
-{
-    Serial.println("\n=== BMS MANAGER VIRTUAL TESTS ===\n");
-
-    testTelemetryDecode();
-    testRecoverableFaults2sConfirm();
-    testSwitchFaultImmediate();
-    testTimeoutFlags();
-
-    Serial.println("\n=== BMS MANAGER TESTS COMPLETE ===\n");
-}
-
-void setup()
-{
-    Serial.begin(115200);
-    delay(1500);
-
-    // Note: no physical TinyBMS needed for these tests.
-    bms.begin(g_now_ms);
-
-    runAllTests();
-}
-
-void loop()
-{
-}
-
