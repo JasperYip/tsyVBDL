@@ -64,7 +64,7 @@ constexpr float STROKE_SPAN_MM = STROKE_HARD_MAX_MM - STROKE_HARD_MIN_MM;
 constexpr float POS_TOL_MM = 0.1f;   // enter hold mode
 constexpr float DRIFT_RESTART_MM = 2.0f;   // restart PID
 
-constexpr float HOMING_PWM = 0.40f;          // slow homing
+constexpr float HOMING_PWM = 0.60f;          // slow homing
 constexpr float HOMING_BACKOFF_DUTY = 0.10f;  //even slower correction
 constexpr float SOFT_ZONE_MAX_DUTY = 0.50f;   // slower in soft zone
 constexpr float MIN_DUTY = 0.20f; // ~8%

@@ -30,8 +30,7 @@ uint32_t lastCanTxFault = 0;
 const uint32_t CAN_TX_CONTROL_INTERVAL_MS = 20;   // 50Hz
 const uint32_t CAN_TX_FAULT_INTERVAL_MS   = 500;  // 2Hz
 uint32_t lastCanRx = 0;
-const uint32_t CAN_TIMEOUT_SMALL_MS = 2000;   // soft fault warning
-const uint32_t CAN_TIMEOUT_LARGE_MS = 10000;  // hard fault latch
+const uint32_t CAN_TIMEOUT_MS = 5000;
 
 // -----------------------------
 // State / mode
@@ -875,6 +874,23 @@ void loop()
   readSerialCommands();
   handleCan();
 
+  // CAN timeout — stay in CAN mode, only fires after first frame received
+  {
+    static bool canTimeoutReported = false;
+    if (mode == ControlMode::CAN && lastCanRx != 0 &&
+        (millis() - lastCanRx > CAN_TIMEOUT_MS)) {
+      motor.setPWM(0);
+      manual_pwm_cmd = 0;
+      pwm = 0;
+      holding = false;
+      if (!canTimeoutReported) {
+        Serial.println("CAN TIMEOUT - Pi connection lost, motor stopped");
+        canTimeoutReported = true;
+      }
+    } else {
+      canTimeoutReported = false;
+    }
+  }
 
   // -----------------------------
   // Motion logic
@@ -986,12 +1002,8 @@ void loop()
   sin.pos_valid  = homed;
   sin.homing_failed = inj_homing_failed;
 
-  bool can_small_to = (mode == ControlMode::CAN && lastCanRx != 0 &&
-                       (millis() - lastCanRx > CAN_TIMEOUT_SMALL_MS));
-  bool can_large_to = (mode == ControlMode::CAN && lastCanRx != 0 &&
-                       (millis() - lastCanRx > CAN_TIMEOUT_LARGE_MS));
-  sin.cmd_timeout_small = can_small_to || inj_cmd_timeout_small;
-  sin.cmd_timeout_large = can_large_to || inj_cmd_timeout_large;
+  sin.cmd_timeout_small = inj_cmd_timeout_small;
+  sin.cmd_timeout_large = inj_cmd_timeout_large;
 
   sin.bms_timeout_small = inj_bms_timeout_small;
   sin.bms_timeout_large = inj_bms_timeout_large;
