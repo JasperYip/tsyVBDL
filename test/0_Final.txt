@@ -30,16 +30,17 @@ uint32_t lastCanTxFault = 0;
 const uint32_t CAN_TX_CONTROL_INTERVAL_MS = 20;   // 50Hz
 const uint32_t CAN_TX_FAULT_INTERVAL_MS   = 500;  // 2Hz
 uint32_t lastCanRx = 0;
-const uint32_t CAN_TIMEOUT_MS = 5000;
+const uint32_t CAN_TIMEOUT_SMALL_MS = 2000;   // soft fault warning
+const uint32_t CAN_TIMEOUT_LARGE_MS = 10000;  // hard fault latch
 
 // -----------------------------
 // State / mode
 // -----------------------------
 enum class ControlMode {
-  AUTO,
-  MANUAL,
+  OVERRIDE,
   CAN,
-  HOMING
+  HOMING,
+  EMERGENCY_RESURFACE
 };
 
 ControlMode mode = ControlMode::CAN;
@@ -60,10 +61,12 @@ float target_mm_cmd = config::STROKE_HARD_MIN_MM;
 float target_mm = target_mm_cmd;
 float target_percent = 0.0f;
 bool homed = false;
+bool homingFailed = false;
 bool holding = false;
 float homingTimer_s = 0.0f;
 ControlMode homingReturnMode = ControlMode::CAN;
 bool debugPrint = false;
+bool override_use_pid = false;
 
 // Serial
 String cmdBuffer;
@@ -196,19 +199,21 @@ bool isHardLimitHit(float pos_mm, bool extending)
 const char* modeName(ControlMode m)
 {
   switch (m) {
-    case ControlMode::AUTO:    return "AUTO";
-    case ControlMode::MANUAL:  return "MANUAL";
-    case ControlMode::CAN:     return "CAN";
-    case ControlMode::HOMING:  return "HOMING";
+    case ControlMode::OVERRIDE:            return "OVERRIDE";
+    case ControlMode::CAN:                return "CAN";
+    case ControlMode::HOMING:             return "HOMING";
+    case ControlMode::EMERGENCY_RESURFACE: return "EMERG_RESURFACE";
   }
   return "?";
 }
 
 uint8_t mapSystemState()
 {
-  if (lastSafety.hard_fault) return can::STATE_FAULT;
-  if (mode == ControlMode::MANUAL && pwm == 0) return can::STATE_HOLD;
-  if (fabs(lastEst.vel_est_mm_s) > 0.5f) return can::STATE_RUN;
+  if (lastSafety.hard_fault)                    return can::STATE_FAULT;
+  if (mode == ControlMode::EMERGENCY_RESURFACE)  return can::STATE_FAULT;
+  if (mode == ControlMode::HOMING)               return can::STATE_HOMING;
+  if (!homed)                                    return can::STATE_UNHOMED;
+  if (fabs(lastEst.vel_est_mm_s) > 0.5f)        return can::STATE_RUN;
   return can::STATE_HOLD;
 }
 
@@ -273,15 +278,15 @@ void printHelp()
   Serial.println("debug t / debug f   -> enable / disable periodic status output");
   Serial.println("status              -> print current status once");
   Serial.println("help                -> this message");
-  Serial.println("-- Serial control mode (after 'auto') --");
+  Serial.println("-- OVERRIDE mode (after 'auto') --");
   Serial.println("h                   -> auto home via ToF (retracts to 10mm)");
   Serial.println("z                   -> mark homed at 10mm");
-  Serial.println("m                   -> manual PWM mode");
-  Serial.println("a                   -> PID auto mode (requires homed)");
-  Serial.println("c                   -> back to CAN mode");
-  Serial.println("%<num>              -> set target percent");
-  Serial.println("p<num>              -> set PWM");
-  Serial.println("f / b / s           -> extend / retract / stop");
+  Serial.println("m                   -> switch to raw PWM control");
+  Serial.println("a                   -> switch to PID position control (requires homed)");
+  Serial.println("c                   -> back to CAN mode (requires homed)");
+  Serial.println("%<num>              -> set PID target percent (auto-enables PID)");
+  Serial.println("p<num>              -> set PWM (auto-enables PWM)");
+  Serial.println("f / b / s           -> extend / retract / stop (auto-enables PWM)");
   Serial.println("recover             -> safety.reset() (clears latched faults)");
   Serial.println("inj / inj0          -> print / clear fault injections");
   Serial.println("-- Hard fault injection --");
@@ -388,26 +393,31 @@ void handleCommand(String cmd)
       Serial.println("Cannot switch mode during homing");
       return;
     }
-    mode = ControlMode::MANUAL;
+    if (mode == ControlMode::EMERGENCY_RESURFACE) {
+      Serial.println("WARNING: Cancelling emergency resurface - taking override control");
+    }
+    mode = ControlMode::OVERRIDE;
+    override_use_pid = false;
     manual_pwm_cmd = 0;
     motor.setPWM(0);
     pwm = 0;
-    Serial.println("Serial control mode - send 'help' for commands");
+    Serial.println("OVERRIDE mode (PWM) - use '%<n>' for PID, 'help' for commands");
     return;
   }
 
-  // === Block all motor/control commands while in CAN or HOMING mode ===
-  if (mode == ControlMode::CAN || mode == ControlMode::HOMING) {
-    Serial.println("In CAN/HOMING mode - send 'auto' to switch to serial control");
+  // === Block all motor/control commands while not in OVERRIDE ===
+  if (mode != ControlMode::OVERRIDE) {
+    Serial.println("In CAN/HOMING mode - send 'auto' to switch to override control");
     return;
   }
 
+  // === OVERRIDE sub-mode selection ===
   if (cmd == "m") {
-    mode = ControlMode::MANUAL;
+    override_use_pid = false;
     manual_pwm_cmd = 0;
     motor.setPWM(0);
     pwm = 0;
-    Serial.println("MANUAL mode");
+    Serial.println("OVERRIDE (PWM) - use p/f/b/s");
     return;
   }
 
@@ -416,12 +426,12 @@ void handleCommand(String cmd)
       Serial.println("ERROR: Not homed");
       return;
     }
-    mode = ControlMode::AUTO;
+    override_use_pid = true;
     target_mm = lastEst.pos_est_mm;
     target_mm_cmd = target_mm;
     pid.reset();
     holding = false;
-    Serial.println("AUTO mode");
+    Serial.println("OVERRIDE (PID) - use '%<n>'");
     return;
   }
 
@@ -441,10 +451,17 @@ void handleCommand(String cmd)
   }
 
   if (cmd.startsWith("%")) {
+    if (!homed) {
+      Serial.println("ERROR: Not homed");
+      return;
+    }
     float pct = cmd.substring(1).toFloat();
     target_percent = constrain(pct, 0.0f, 100.0f);
     target_mm_cmd = percentToMm(target_percent);
-    Serial.print("Target: ");
+    override_use_pid = true;
+    pid.reset();
+    holding = false;
+    Serial.print("PID target: ");
     Serial.print(target_percent);
     Serial.print("% -> ");
     Serial.println(target_mm_cmd);
@@ -452,22 +469,22 @@ void handleCommand(String cmd)
   }
 
   if (cmd.startsWith("p")) {
-    if (mode == ControlMode::AUTO || mode == ControlMode::CAN) return;
     manual_pwm_cmd = constrain(cmd.substring(1).toInt(), 0, 255);
+    override_use_pid = false;
     return;
   }
 
   if (cmd == "f") {
-    if (mode == ControlMode::AUTO || mode == ControlMode::CAN) return;
     motor.setDirection(MotorDriver::Direction::EXTEND);
     lastDirectionExtend = true;
+    override_use_pid = false;
     return;
   }
 
   if (cmd == "b") {
-    if (mode == ControlMode::AUTO || mode == ControlMode::CAN) return;
     motor.setDirection(MotorDriver::Direction::RETRACT);
     lastDirectionExtend = false;
+    override_use_pid = false;
     return;
   }
 
@@ -475,6 +492,7 @@ void handleCommand(String cmd)
     manual_pwm_cmd = 0;
     pwm = 0;
     motor.setPWM(0);
+    override_use_pid = false;
     return;
   }
 
@@ -506,11 +524,6 @@ void handleCommand(String cmd)
 
   if (cmd == "inj") {
     printInjections();
-    return;
-  }
-
-  if (cmd == "status") {
-    printStatus(lastEst);
     return;
   }
 
@@ -549,10 +562,6 @@ void handleCommand(String cmd)
   if (cmd == "sslip0") { inj_slip = false; return; }
 
   if (cmd == "h") {
-    if (mode == ControlMode::AUTO) {
-      Serial.println("ERROR: Switch to MANUAL first (send 'm')");
-      return;
-    }
     motor.setPWM(0);
     motor.setDirection(MotorDriver::Direction::RETRACT);
     lastDirectionExtend = false;
@@ -560,8 +569,9 @@ void handleCommand(String cmd)
     pwm = 0;
     homingTimer_s = 0.0f;
     homed = false;
+    homingFailed = false;
     holding = false;
-    homingReturnMode = ControlMode::MANUAL;
+    homingReturnMode = ControlMode::OVERRIDE;
     mode = ControlMode::HOMING;
     Serial.println("HOMING: retracting until ToF reads 10mm...");
     return;
@@ -633,6 +643,8 @@ void handleCan()
         manual_pwm_cmd = 0;
         pwm = 0;
         homingTimer_s = 0.0f;
+        homed = false;
+        homingFailed = false;
         holding = false;
         homingReturnMode = ControlMode::CAN;
         mode = ControlMode::HOMING;
@@ -721,6 +733,7 @@ void handleHoming(float dt)
   if (homingTimer_s > config::HOMING_TIMEOUT_S) {
     motor.setPWM(0);
     pwm = 0;
+    homingFailed = true;
     mode = homingReturnMode;
     Serial.println("HOMING TIMEOUT - aborted");
     return;
@@ -874,22 +887,17 @@ void loop()
   readSerialCommands();
   handleCan();
 
-  // CAN timeout — stay in CAN mode, only fires after first frame received
-  {
-    static bool canTimeoutReported = false;
-    if (mode == ControlMode::CAN && lastCanRx != 0 &&
-        (millis() - lastCanRx > CAN_TIMEOUT_MS)) {
-      motor.setPWM(0);
-      manual_pwm_cmd = 0;
-      pwm = 0;
-      holding = false;
-      if (!canTimeoutReported) {
-        Serial.println("CAN TIMEOUT - Pi connection lost, motor stopped");
-        canTimeoutReported = true;
-      }
-    } else {
-      canTimeoutReported = false;
-    }
+  // Emergency resurface: large CAN timeout only — not triggered if a real hard fault exists
+  // (real faults stop motor and Pi coordinates; this is only the Pi-is-dead fallback)
+  if (mode == ControlMode::CAN && lastCanRx != 0 &&
+      (millis() - lastCanRx > CAN_TIMEOUT_LARGE_MS) &&
+      !lastSafety.hard_fault) {
+    mode = ControlMode::EMERGENCY_RESURFACE;
+    target_mm_cmd = config::STROKE_HARD_MAX_MM;
+    target_mm = lastEst.pos_est_mm;
+    pid.reset();
+    holding = false;
+    Serial.println("!! EMERGENCY RESURFACE - CAN lost >10s, extending to 100%");
   }
 
   // -----------------------------
@@ -897,41 +905,82 @@ void loop()
   // -----------------------------
   if (mode == ControlMode::HOMING) {
     handleHoming(dt);
-  } else if (mode == ControlMode::MANUAL) {
+
+  } else if (mode == ControlMode::OVERRIDE) {
     float pos = lastEst.pos_est_mm;
-    bool extending = lastDirectionExtend;
 
-    float duty = static_cast<float>(manual_pwm_cmd) / static_cast<float>(PWM_MAX);
-    duty *= computeSoftZoneScale(pos);
+    if (!override_use_pid) {
+      // --- Raw PWM control ---
+      bool extending = lastDirectionExtend;
+      float duty = static_cast<float>(manual_pwm_cmd) / static_cast<float>(PWM_MAX);
+      duty *= computeSoftZoneScale(pos);
+      if (isHardLimitHit(pos, extending)) duty = 0.0f;
+      duty = constrain(duty, 0.0f, 1.0f);
+      pwm = static_cast<int>(roundf(duty * static_cast<float>(PWM_MAX)));
+      motor.setDirection(extending ?
+        MotorDriver::Direction::EXTEND :
+        MotorDriver::Direction::RETRACT);
+      motor.setPWM(pwm);
 
-    if (isHardLimitHit(pos, extending)) {
-      duty = 0.0f;
+    } else {
+      // --- PID position control ---
+      float vel = lastEst.vel_est_mm_s;
+      float max_step = 40.0f * dt;
+      float delta = target_mm_cmd - target_mm;
+      if (fabs(delta) > max_step) {
+        target_mm += (delta > 0 ? max_step : -max_step);
+      } else {
+        target_mm = target_mm_cmd;
+      }
+      target_mm = constrain(target_mm, config::STROKE_HARD_MIN_MM, config::STROKE_HARD_MAX_MM);
+
+      float error = target_mm - pos;
+      bool skipPid = false;
+
+      if (holding) {
+        if (fabs(error) > config::DRIFT_RESTART_MM) {
+          holding = false;
+        } else {
+          pwm = 0; motor.setPWM(0); skipPid = true;
+        }
+      }
+
+      if (!skipPid) {
+        bool near_target = fabs(error) <= config::POS_TOL_MM;
+        bool slow = fabs(vel) < 0.5f;
+        bool not_pushing = (error > 0 && vel <= 0) || (error < 0 && vel >= 0);
+        if (near_target && slow && not_pushing) {
+          pwm = 0; motor.setPWM(0); holding = true; skipPid = true;
+        }
+      }
+
+      if (!skipPid) {
+        float effort = pid.update(target_mm, pos, vel, dt);
+        bool dir = (effort > 0);
+        lastDirectionExtend = dir;
+        motor.setDirection(dir ? MotorDriver::Direction::EXTEND : MotorDriver::Direction::RETRACT);
+        float duty = fabs(effort);
+        if (duty > 0.0f) duty = config::MIN_DUTY + (1.0f - config::MIN_DUTY) * duty;
+        duty *= computeSoftZoneScale(pos);
+        if (isHardLimitHit(pos, dir)) duty = 0.0f;
+        duty = constrain(duty, 0.0f, 1.0f);
+        pwm = duty * PWM_MAX;
+        motor.setPWM(pwm);
+      }
     }
 
-    duty = constrain(duty, 0.0f, 1.0f);
-
-    pwm = static_cast<int>(roundf(duty * static_cast<float>(PWM_MAX)));
-
-    motor.setDirection(extending ?
-      MotorDriver::Direction::EXTEND :
-      MotorDriver::Direction::RETRACT);
-    motor.setPWM(pwm);
-  } else if (mode == ControlMode::AUTO || mode == ControlMode::CAN) {
+  } else if (mode == ControlMode::CAN || mode == ControlMode::EMERGENCY_RESURFACE) {
     float pos = lastEst.pos_est_mm;
     float vel = lastEst.vel_est_mm_s;
 
     float max_step = 40.0f * dt;
     float delta = target_mm_cmd - target_mm;
-
     if (fabs(delta) > max_step) {
       target_mm += (delta > 0 ? max_step : -max_step);
     } else {
       target_mm = target_mm_cmd;
     }
-
-    target_mm = constrain(target_mm,
-                          config::STROKE_HARD_MIN_MM,
-                          config::STROKE_HARD_MAX_MM);
+    target_mm = constrain(target_mm, config::STROKE_HARD_MIN_MM, config::STROKE_HARD_MAX_MM);
 
     float error = target_mm - pos;
     bool skipPid = false;
@@ -940,24 +989,16 @@ void loop()
       if (fabs(error) > config::DRIFT_RESTART_MM) {
         holding = false;
       } else {
-        pwm = 0;
-        motor.setPWM(0);
-        skipPid = true;
+        pwm = 0; motor.setPWM(0); skipPid = true;
       }
     }
 
     if (!skipPid) {
       bool near_target = fabs(error) <= config::POS_TOL_MM;
       bool slow = fabs(vel) < 0.5f;
-      bool not_pushing_toward_target =
-        (error > 0 && vel <= 0) ||
-        (error < 0 && vel >= 0);
-
-      if (near_target && slow && not_pushing_toward_target) {
-        pwm = 0;
-        motor.setPWM(0);
-        holding = true;
-        skipPid = true;
+      bool not_pushing = (error > 0 && vel <= 0) || (error < 0 && vel >= 0);
+      if (near_target && slow && not_pushing) {
+        pwm = 0; motor.setPWM(0); holding = true; skipPid = true;
       }
     }
 
@@ -965,22 +1006,11 @@ void loop()
       float effort = pid.update(target_mm, pos, vel, dt);
       bool dir = (effort > 0);
       lastDirectionExtend = dir;
-
-      motor.setDirection(dir ?
-        MotorDriver::Direction::EXTEND :
-        MotorDriver::Direction::RETRACT);
-
+      motor.setDirection(dir ? MotorDriver::Direction::EXTEND : MotorDriver::Direction::RETRACT);
       float duty = fabs(effort);
-      if (duty > 0.0f) {
-        duty = config::MIN_DUTY +
-               (1.0f - config::MIN_DUTY) * duty;
-      }
-
+      if (duty > 0.0f) duty = config::MIN_DUTY + (1.0f - config::MIN_DUTY) * duty;
       duty *= computeSoftZoneScale(pos);
-      if (isHardLimitHit(pos, dir)) {
-        duty = 0.0f;
-      }
-
+      if (isHardLimitHit(pos, dir)) duty = 0.0f;
       duty = constrain(duty, 0.0f, 1.0f);
       pwm = duty * PWM_MAX;
       motor.setPWM(pwm);
@@ -1000,10 +1030,19 @@ void loop()
 
   sin.pos_est_mm = lastEst.pos_est_mm;
   sin.pos_valid  = homed;
-  sin.homing_failed = inj_homing_failed;
+  sin.homing_failed = homingFailed || inj_homing_failed;
 
-  sin.cmd_timeout_small = inj_cmd_timeout_small;
-  sin.cmd_timeout_large = inj_cmd_timeout_large;
+  bool in_can_family = (mode == ControlMode::CAN ||
+                        mode == ControlMode::EMERGENCY_RESURFACE);
+  bool can_small_to = (in_can_family && lastCanRx != 0 &&
+                       (millis() - lastCanRx > CAN_TIMEOUT_SMALL_MS));
+  sin.cmd_timeout_small = can_small_to || inj_cmd_timeout_small;
+  // Large timeout still latches as hard fault so Pi sees FAULT_CMD_TO_L on reconnect.
+  // Motor disable is suppressed separately during emergency resurface.
+  bool can_large_to = (mode == ControlMode::EMERGENCY_RESURFACE) ||
+                      (mode == ControlMode::CAN && lastCanRx != 0 &&
+                       (millis() - lastCanRx > CAN_TIMEOUT_LARGE_MS));
+  sin.cmd_timeout_large = can_large_to || inj_cmd_timeout_large;
 
   sin.bms_timeout_small = inj_bms_timeout_small;
   sin.bms_timeout_large = inj_bms_timeout_large;
@@ -1014,17 +1053,31 @@ void loop()
   sin.bms_high_voltage = inj_bms_high_voltage;
 
   sin.tof_valid = inj_tof_invalid ? false : lastToF.valid;
-  sin.tof_out_of_range = inj_tof_out_of_range;
+  bool tof_oor = lastToF.valid &&
+                 (lastTofMm < config::STROKE_REAL_MIN_MM ||
+                  lastTofMm > config::STROKE_REAL_MAX_MM);
+  sin.tof_out_of_range = tof_oor || inj_tof_out_of_range;
   sin.slip_detected = inj_slip || lastEst.slip_detected;
 
   lastSafety = safety.update(sin, dt);
 
-  // Hard fault response: stop motor immediately
+  // Hard fault response: stop motor immediately.
+  // Exception: during emergency resurface, suppress disable if the ONLY latched
+  // fault is FAULT_CMD_TO_L — that fault is what caused the resurface, and the
+  // motor must keep running to surface. Any other concurrent hard fault still wins.
   if (lastSafety.hard_fault) {
-    motor.setPWM(0);
-    motor.disable();
-    manual_pwm_cmd = 0;
-    pwm = 0;
+    bool only_can_timeout = (lastSafety.hard_fault_a == can::FAULT_CMD_TO_L &&
+                             lastSafety.hard_fault_b == 0);
+    bool suppress_disable = (mode == ControlMode::EMERGENCY_RESURFACE && only_can_timeout);
+
+    if (!suppress_disable) {
+      motor.setPWM(0);
+      motor.disable();
+      manual_pwm_cmd = 0;
+      pwm = 0;
+    } else {
+      if (!motor.enabled()) motor.enable();
+    }
   } else {
     if (!motor.enabled()) {
       motor.enable();
