@@ -51,13 +51,13 @@ constexpr uint32_t BMS_BAUD  = 115200;
 // =====================
 // VL6180X ToF (I2C)
 // =====================
-constexpr uint8_t PIN_TOF_SCL = 16;
-constexpr uint8_t PIN_TOF_SDA = 17;
+constexpr uint8_t PIN_TOF_SCL = 17;
+constexpr uint8_t PIN_TOF_SDA = 16;
 
 // =====================
 // Leak sensor
 // =====================
-constexpr uint8_t PIN_LEAK = 18;
+constexpr uint8_t PIN_LEAK = 9;
 
 // =====================
 // Motor driver (Pololu G2 24v13)

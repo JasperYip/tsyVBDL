@@ -43,7 +43,7 @@ constexpr uint32_t PWM_FREQ_HZ = 25000;      // Motor PWM frequency
    STROKE GEOMETRY
 ---------------------------------------------------------- */
 
-constexpr float STROKE_REAL_MIN_MM = 0.0f;
+constexpr float STROKE_REAL_MIN_MM = 8.0f;
 constexpr float STROKE_REAL_MAX_MM = 150.0f;
 
 // usable control range
