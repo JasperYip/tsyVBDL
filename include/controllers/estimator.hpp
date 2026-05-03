@@ -10,7 +10,7 @@ public:
         float recovery_gain;
         float slip_detect_mm;
         float tof_min_valid_mm;
-        // float tof_offset_mm;
+        bool  tof_only = false;  // true = no encoder, ToF is sole position source
     };
 
     struct Output {

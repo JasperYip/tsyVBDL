@@ -3,7 +3,7 @@
 #include <cmath>
 #include <cstring>
 
-constexpr uint8_t BmsManager::kPollCommands[7];
+constexpr uint8_t BmsManager::kPollCommands[8];
 
 BmsManager::BmsManager()
 {
@@ -183,7 +183,8 @@ void BmsManager::parseRx(uint32_t now_ms)
                    type == CMD_READ_MIN_CELL ||
                    type == CMD_READ_ONLINE_STATUS) {
             frame_len = 6;
-        } else if (type == CMD_READ_TEMPERATURES ||
+        } else if (type == CMD_READ_CELL_VOLTAGES  ||
+                   type == CMD_READ_TEMPERATURES   ||
                    type == CMD_READ_NEWEST_EVENTS) {
             if (rx_len_ < 3) {
                 break;
@@ -293,6 +294,21 @@ void BmsManager::handleFrame(const uint8_t* frame, uint16_t len, uint32_t now_ms
     case CMD_READ_ONLINE_STATUS:
         if (len == 6) {
             telemetry_.online_status = readU16LE(&frame[2]);
+            markSnapshotBit(type, now_ms);
+        }
+        completePending(type);
+        break;
+
+    case CMD_READ_CELL_VOLTAGES:
+        // AA 1A PL [u16_cell1_LE] [u16_cell2_LE] ... CRCL CRCH
+        // For 6 cells: PL=12, frame_len=17
+        {
+            const uint8_t pl = frame[2];
+            const uint8_t num = (pl / 2u) < 6u ? (pl / 2u) : 6u;
+            for (uint8_t i = 0; i < num; i++) {
+                telemetry_.cell_mv[i] = readU16LE(&frame[3 + i * 2]);
+            }
+            telemetry_.num_cells = num;
             markSnapshotBit(type, now_ms);
         }
         completePending(type);
@@ -533,13 +549,14 @@ void BmsManager::advancePoll()
 void BmsManager::markSnapshotBit(uint8_t cmd, uint32_t now_ms)
 {
     switch (cmd) {
-    case CMD_READ_PACK_VOLTAGE:  snapshot_mask_ |= SNAP_VOLTAGE; break;
-    case CMD_READ_PACK_CURRENT:  snapshot_mask_ |= SNAP_CURRENT; break;
-    case CMD_READ_MAX_CELL:      snapshot_mask_ |= SNAP_MAX_CELL; break;
-    case CMD_READ_MIN_CELL:      snapshot_mask_ |= SNAP_MIN_CELL; break;
-    case CMD_READ_ONLINE_STATUS: snapshot_mask_ |= SNAP_STATUS; break;
-    case CMD_READ_TEMPERATURES:  snapshot_mask_ |= SNAP_TEMPS; break;
-    case CMD_READ_NEWEST_EVENTS: snapshot_mask_ |= SNAP_EVENTS; break;
+    case CMD_READ_PACK_VOLTAGE:   snapshot_mask_ |= SNAP_VOLTAGE;  break;
+    case CMD_READ_PACK_CURRENT:   snapshot_mask_ |= SNAP_CURRENT;  break;
+    case CMD_READ_MAX_CELL:       snapshot_mask_ |= SNAP_MAX_CELL; break;
+    case CMD_READ_MIN_CELL:       snapshot_mask_ |= SNAP_MIN_CELL; break;
+    case CMD_READ_ONLINE_STATUS:  snapshot_mask_ |= SNAP_STATUS;   break;
+    case CMD_READ_CELL_VOLTAGES:  snapshot_mask_ |= SNAP_CELLS;    break;
+    case CMD_READ_TEMPERATURES:   snapshot_mask_ |= SNAP_TEMPS;    break;
+    case CMD_READ_NEWEST_EVENTS:  snapshot_mask_ |= SNAP_EVENTS;   break;
     default: break;
     }
 

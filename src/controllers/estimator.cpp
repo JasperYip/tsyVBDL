@@ -29,39 +29,56 @@ Estimator::Output Estimator::update(int32_t encoder_count,
                                     uint16_t tof_mm,
                                     float dt)
 {
-    // ---- Encoder integration ----
-    if (!encoder_initialized_) {
-        last_encoder_count_ = encoder_count;
-        encoder_initialized_ = true;
-    }
-
-    int32_t delta_counts = encoder_count - last_encoder_count_;
-    last_encoder_count_ = encoder_count;
-
-    float delta_mm = static_cast<float>(delta_counts) * cfg_.mm_per_count;
-
-    pos_est_mm_ += delta_mm;
-    vel_est_mm_s_ = (dt > 0.0f) ? (delta_mm / dt) : 0.0f;
-
-    // ---- ToF validation ----
     bool tof_valid = tof_valid_hw && (tof_mm >= cfg_.tof_min_valid_mm);
 
-    last_tof_valid_ = tof_valid;
-    if (tof_valid) {
-        last_tof_mm_ = tof_mm;
+    if (cfg_.tof_only) {
+        // ---- ToF-only mode (no encoder) ----
+        if (tof_valid) {
+            float tof_pos_mm = static_cast<float>(tof_mm);
 
-        float tof_pos_mm = static_cast<float>(tof_mm);
-        //float tof_pos_mm = static_cast<float>(tof_mm) + cfg_.tof_offset_mm;
-        float error_mm = tof_pos_mm - pos_est_mm_;
+            // Velocity from consecutive ToF readings.
+            if (last_tof_valid_ && dt > 0.0f) {
+                vel_est_mm_s_ = (tof_pos_mm - static_cast<float>(last_tof_mm_)) / dt;
+            } else {
+                vel_est_mm_s_ = 0.0f;
+            }
 
-        slip_detected_ = (std::fabs(error_mm) > cfg_.slip_detect_mm);
+            pos_est_mm_  = tof_pos_mm;
+            last_tof_mm_ = tof_mm;
+        }
+        // If ToF is invalid, hold last known position and zero velocity.
+        last_tof_valid_ = tof_valid;
+        slip_detected_  = false;
 
-        float gain = slip_detected_ ? cfg_.recovery_gain
-                                    : cfg_.tof_gain;
-
-        pos_est_mm_ += gain * error_mm;
     } else {
-        slip_detected_ = false;
+        // ---- Encoder + ToF fusion mode ----
+        if (!encoder_initialized_) {
+            last_encoder_count_ = encoder_count;
+            encoder_initialized_ = true;
+        }
+
+        int32_t delta_counts = encoder_count - last_encoder_count_;
+        last_encoder_count_ = encoder_count;
+
+        float delta_mm = static_cast<float>(delta_counts) * cfg_.mm_per_count;
+
+        pos_est_mm_   += delta_mm;
+        vel_est_mm_s_  = (dt > 0.0f) ? (delta_mm / dt) : 0.0f;
+
+        last_tof_valid_ = tof_valid;
+        if (tof_valid) {
+            last_tof_mm_ = tof_mm;
+
+            float tof_pos_mm = static_cast<float>(tof_mm);
+            float error_mm   = tof_pos_mm - pos_est_mm_;
+
+            slip_detected_ = (std::fabs(error_mm) > cfg_.slip_detect_mm);
+
+            float gain = slip_detected_ ? cfg_.recovery_gain : cfg_.tof_gain;
+            pos_est_mm_ += gain * error_mm;
+        } else {
+            slip_detected_ = false;
+        }
     }
 
     return Output{

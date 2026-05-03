@@ -48,11 +48,11 @@ constexpr float STROKE_REAL_MAX_MM = 150.0f;
 
 // usable control range
 constexpr float STROKE_HARD_MIN_MM = 10.0f;
-constexpr float STROKE_HARD_MAX_MM = 145.0f;
+constexpr float STROKE_HARD_MAX_MM = 140.0f;
 
 // soft zones
 constexpr float STROKE_SOFT_START_MM = 20.0f;
-constexpr float STROKE_SOFT_END_MM   = 135.0f;
+constexpr float STROKE_SOFT_END_MM   = 130.0f;
 
 // stroke span
 constexpr float STROKE_SPAN_MM = STROKE_HARD_MAX_MM - STROKE_HARD_MIN_MM;

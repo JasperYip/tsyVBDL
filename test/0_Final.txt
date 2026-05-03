@@ -11,12 +11,20 @@
 #include "drivers/tof_sensor.hpp"
 #include "drivers/can_bus.hpp"
 #include "drivers/leak_sensor.hpp"
+#include "drivers/bms.hpp"
 
 #include "controllers/estimator.hpp"
 #include "controllers/pid_controller.hpp"
 #include "controllers/safety_manager.hpp"
+#include "controllers/bms_manager.hpp"
 
 #include "protocols/can_messages.hpp"
+
+// -----------------------------
+// Hardware configuration
+// -----------------------------
+// Set false for motors without an encoder — ToF becomes the sole position source.
+constexpr bool USE_ENCODER = false;
 
 // -----------------------------
 // CAN
@@ -24,14 +32,27 @@
 constexpr uint8_t CAN_NODE_ID = config::NODE_ID_LEFT;
 static CanBus canBus;
 uint8_t canSequenceControl = 0;
-uint8_t canSequenceFault = 0;
+uint8_t canSequenceFault   = 0;
+uint8_t canSequenceBms     = 0;
+uint8_t canSequenceBmsMore = 0;
 uint32_t lastCanTxControl = 0;
-uint32_t lastCanTxFault = 0;
-const uint32_t CAN_TX_CONTROL_INTERVAL_MS = 20;   // 50Hz
-const uint32_t CAN_TX_FAULT_INTERVAL_MS   = 500;  // 2Hz
+uint32_t lastCanTxFault   = 0;
+uint32_t lastCanTxBms     = 0;
+const uint32_t CAN_TX_CONTROL_INTERVAL_MS = 20;   // 50 Hz
+const uint32_t CAN_TX_FAULT_INTERVAL_MS   = 500;  //  2 Hz
+const uint32_t CAN_TX_BMS_INTERVAL_MS     = 500;  //  2 Hz
 uint32_t lastCanRx = 0;
 const uint32_t CAN_TIMEOUT_SMALL_MS = 2000;   // soft fault warning
 const uint32_t CAN_TIMEOUT_LARGE_MS = 10000;  // hard fault latch
+
+// -----------------------------
+// BMS
+// -----------------------------
+static BmsUart bmsUart({
+    .serial = &Serial2,
+    .baud   = BMS_BAUD
+});
+static BmsManager bmsManager;
 
 // -----------------------------
 // State / mode
@@ -135,7 +156,8 @@ static Estimator estimator({
   .tof_gain          = config::TOF_FUSION_GAIN,
   .recovery_gain     = config::SLIP_RECOVERY_GAIN,
   .slip_detect_mm    = config::SLIP_DETECT_MM,
-  .tof_min_valid_mm  = config::TOF_MIN_VALID_MM
+  .tof_min_valid_mm  = config::TOF_MIN_VALID_MM,
+  .tof_only          = !USE_ENCODER
 });
 
 static PIDController pid;
@@ -498,11 +520,13 @@ void handleCommand(String cmd)
 
   if (cmd == "z") {
     float home_mm = 10.0f;
-    int32_t home_counts = roundf(home_mm / config::MM_PER_COUNT);
-    enc.writeCounts(home_counts);
+    if (USE_ENCODER) {
+      int32_t home_counts = roundf(home_mm / config::MM_PER_COUNT);
+      enc.writeCounts(home_counts);
+    }
     estimator.reset();
     estimator.setPositionMm(home_mm);
-    estimator.syncEncoder(enc.readCounts());
+    if (USE_ENCODER) estimator.syncEncoder(enc.readCounts());
     pid.reset();
     homed = true;
     Serial.println("HOMED at 10mm");
@@ -723,6 +747,104 @@ void sendStatusFault()
   canBus.write(frame);
 }
 
+// Helper: encode mV to the (mV−2500)/10 uint8 used in STATUS_BMS / STATUS_BMS_MORE.
+// Clamps to valid uint8 range.
+static uint8_t encodeCellV(uint16_t mv)
+{
+    if (mv < 2500) return 0;
+    uint32_t raw = (mv - 2500u) / 10u;
+    return (raw > 254u) ? 254u : static_cast<uint8_t>(raw);
+}
+
+// Map TinyBMS online_status word to compact 0-5 enum.
+static uint8_t mapBmsStatus(uint16_t s)
+{
+    switch (s) {
+        case 0x0091: return 1;  // Charging
+        case 0x0092: return 2;  // FullyCharged
+        case 0x0093: return 3;  // Discharging
+        case 0x0096: return 3;  // Regeneration → treat as Discharging
+        case 0x0097: return 4;  // Idle
+        case 0x009B: return 5;  // Fault
+        default:     return 0;  // Unknown
+    }
+}
+
+void sendStatusBms()
+{
+    const auto& t = bmsManager.telemetry();
+
+    can::StatusBMS msg{};
+
+    // Pack voltage: float V → uint8 ×0.1V  (clamp 0–25.5V)
+    {
+        float v = t.pack_voltage_v * 10.0f;
+        if (v < 0.0f) v = 0.0f;
+        if (v > 255.0f) v = 255.0f;
+        msg.pack_V = static_cast<uint8_t>(v);
+    }
+
+    msg.min_cell_V = encodeCellV(t.min_cell_mv);
+    msg.max_cell_V = encodeCellV(t.max_cell_mv);
+
+    // Pack current: float A → int8 ×0.5A  (+ = discharge)
+    {
+        float c = t.pack_current_a / 0.5f;
+        if (c < -128.0f) c = -128.0f;
+        if (c >  127.0f) c =  127.0f;
+        msg.pack_current = static_cast<int8_t>(c);
+    }
+
+    // Temperature: 0.1°C int16 → uint8 °C  (0xFF = invalid / not connected)
+    auto encodeTemp = [](int16_t dC) -> uint8_t {
+        if (dC == -32768) return 0xFF;        // not connected sentinel
+        int32_t degC = dC / 10;
+        if (degC < 0)   return 0;
+        if (degC > 254) return 254;
+        return static_cast<uint8_t>(degC);
+    };
+
+    msg.temp_internal = encodeTemp(t.pack_temp_dC);
+    msg.temp_ext1     = encodeTemp(t.ext1_temp_dC);
+    msg.temp_ext2     = encodeTemp(t.ext2_temp_dC);
+
+    msg.sequence = canSequenceBms++;
+
+    uint8_t buf[8];
+    can::packStatusBMS(buf, msg);
+
+    CanFrame frame;
+    frame.id  = can::STATUS_BMS_BASE + CAN_NODE_ID;
+    frame.len = 8;
+    for (int i = 0; i < 8; i++) frame.data[i] = buf[i];
+    canBus.write(frame);
+}
+
+void sendStatusBmsMore()
+{
+    const auto& t = bmsManager.telemetry();
+
+    can::StatusBmsMore msg{};
+
+    const uint8_t cells = (t.num_cells > 6) ? 6 : t.num_cells;
+    for (uint8_t i = 0; i < cells; i++) {
+        msg.cell_V[i] = encodeCellV(t.cell_mv[i]);
+    }
+    // Unused cell slots stay 0.
+
+    msg.online_status = mapBmsStatus(t.online_status);
+    msg.sequence      = canSequenceBmsMore++;
+
+    uint8_t buf[8];
+    can::packStatusBmsMore(buf, msg);
+
+    CanFrame frame;
+    frame.id  = can::STATUS_BMS_MORE_BASE + CAN_NODE_ID;
+    frame.len = 8;
+    for (int i = 0; i < 8; i++) frame.data[i] = buf[i];
+    canBus.write(frame);
+}
+
 // -----------------------------
 // Homing (ToF-based)
 // -----------------------------
@@ -752,11 +874,13 @@ void handleHoming(float dt)
     pwm = 0;
 
     float home_mm = config::STROKE_HARD_MIN_MM;
-    int32_t home_counts = (int32_t)roundf(home_mm / config::MM_PER_COUNT);
-    enc.writeCounts(home_counts);
+    if (USE_ENCODER) {
+      int32_t home_counts = (int32_t)roundf(home_mm / config::MM_PER_COUNT);
+      enc.writeCounts(home_counts);
+    }
     estimator.reset();
     estimator.setPositionMm(home_mm);
-    estimator.syncEncoder(enc.readCounts());
+    if (USE_ENCODER) estimator.syncEncoder(enc.readCounts());
     pid.reset();
 
     homed = true;
@@ -764,7 +888,7 @@ void handleHoming(float dt)
 
     Serial.print("HOMED - ToF=");
     Serial.print(lastTofMm, 1);
-    Serial.println("mm, encoder set to 10mm");
+    Serial.println(USE_ENCODER ? "mm, encoder set to 10mm" : "mm (ToF-only mode)");
     return;
   }
 
@@ -790,11 +914,11 @@ void setup()
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
 
-  enc.begin();
+  if (USE_ENCODER) enc.begin();
   leak.begin(false); // Blue Robotics SOS style output: active high
 
   estimator.reset();
-  estimator.syncEncoder(enc.readCounts());
+  if (USE_ENCODER) estimator.syncEncoder(enc.readCounts());
 
   if (!tof.begin(Wire1)) {
     Serial.println("WARN: ToF init failed");
@@ -829,6 +953,17 @@ void setup()
   safety.reset();
 
   canBus.begin(500000, PIN_CAN_R, PIN_CAN_D);
+
+  bmsManager.configure({
+      .transport           = &bmsUart,
+      .poll_interval_ms    = 140,       // 8 commands × 140ms ≈ 1.1s full cycle
+      .response_timeout_ms = 100,
+      .max_retries         = 1,
+      .fault_confirm_ms    = (uint32_t)(config::BMS_TEMP_CONFIRM_S * 1000.0f),
+      .timeout_small_ms    = config::BMS_TIMEOUT_SMALL_MS,
+      .timeout_large_ms    = config::BMS_TIMEOUT_LARGE_MS
+  });
+  bmsManager.begin(millis());
 
   Serial.println("VBD ready - CAN mode. Send CMD_START_HOMING via CAN to home.");
   Serial.println("Serial: 'auto' = serial control, 'debug t/f' = status on/off, 'help' = commands");
@@ -867,7 +1002,7 @@ void loop()
   }
 
   // Sensors
-  int32_t counts = enc.readCounts();
+  int32_t counts = USE_ENCODER ? enc.readCounts() : 0;
 
   lastToF = tof.read();
   lastTofRawMm = lastToF.mm;
@@ -886,6 +1021,7 @@ void loop()
   // Inputs
   readSerialCommands();
   handleCan();
+  bmsManager.update(now);
 
   // Emergency resurface: large CAN timeout only — not triggered if a real hard fault exists
   // (real faults stop motor and Pi coordinates; this is only the Pi-is-dead fallback)
@@ -970,6 +1106,11 @@ void loop()
     }
 
   } else if (mode == ControlMode::CAN || mode == ControlMode::EMERGENCY_RESURFACE) {
+    if (mode == ControlMode::CAN && !homed) {
+      motor.setPWM(0);
+      pwm = 0;
+    } else {
+
     float pos = lastEst.pos_est_mm;
     float vel = lastEst.vel_est_mm_s;
 
@@ -1015,6 +1156,8 @@ void loop()
       pwm = duty * PWM_MAX;
       motor.setPWM(pwm);
     }
+
+    } // end homed/EMERGENCY_RESURFACE branch
   }
 
   // -----------------------------
@@ -1044,13 +1187,14 @@ void loop()
                        (millis() - lastCanRx > CAN_TIMEOUT_LARGE_MS));
   sin.cmd_timeout_large = can_large_to || inj_cmd_timeout_large;
 
-  sin.bms_timeout_small = inj_bms_timeout_small;
-  sin.bms_timeout_large = inj_bms_timeout_large;
-  sin.bms_temp_high = inj_bms_temp_high;
-  sin.bms_overcurrent = inj_bms_overcurrent;
-  sin.bms_switch_fault = inj_bms_switch_fault;
-  sin.bms_low_voltage = inj_bms_low_voltage;
-  sin.bms_high_voltage = inj_bms_high_voltage;
+  const auto& bmsFlags = bmsManager.flags();
+  sin.bms_timeout_small = bmsFlags.bms_timeout_small || inj_bms_timeout_small;
+  sin.bms_timeout_large = bmsFlags.bms_timeout_large || inj_bms_timeout_large;
+  sin.bms_temp_high     = bmsFlags.bms_temp_high     || inj_bms_temp_high;
+  sin.bms_overcurrent   = bmsFlags.bms_overcurrent   || inj_bms_overcurrent;
+  sin.bms_switch_fault  = bmsFlags.bms_switch_fault  || inj_bms_switch_fault;
+  sin.bms_low_voltage   = bmsFlags.bms_low_voltage   || inj_bms_low_voltage;
+  sin.bms_high_voltage  = bmsFlags.bms_high_voltage  || inj_bms_high_voltage;
 
   sin.tof_valid = inj_tof_invalid ? false : lastToF.valid;
   bool tof_oor = lastToF.valid &&
@@ -1095,6 +1239,12 @@ void loop()
   if (now - lastCanTxFault >= CAN_TX_FAULT_INTERVAL_MS) {
     lastCanTxFault = now;
     sendStatusFault();
+  }
+
+  if (now - lastCanTxBms >= CAN_TX_BMS_INTERVAL_MS) {
+    lastCanTxBms = now;
+    sendStatusBms();
+    sendStatusBmsMore();
   }
 
   // -----------------------------
