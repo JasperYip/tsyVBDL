@@ -300,13 +300,14 @@ void BmsManager::handleFrame(const uint8_t* frame, uint16_t len, uint32_t now_ms
         break;
 
     case CMD_READ_CELL_VOLTAGES:
-        // AA 1A PL [u16_cell1_LE] [u16_cell2_LE] ... CRCL CRCH
-        // For 6 cells: PL=12, frame_len=17
+        // AA 1C PL [u16_cell1_LE] [u16_cell2_LE] ... CRCL CRCH
+        // Each cell is UINT16, resolution 0.1 mV → divide by 10 to get mV.
         {
-            const uint8_t pl = frame[2];
-            const uint8_t num = (pl / 2u) < 6u ? (pl / 2u) : 6u;
+            const uint8_t pl  = frame[2];
+            const uint8_t num = (pl / 2u) < 6u ? static_cast<uint8_t>(pl / 2u) : 6u;
             for (uint8_t i = 0; i < num; i++) {
-                telemetry_.cell_mv[i] = readU16LE(&frame[3 + i * 2]);
+                const uint16_t raw_01mv = readU16LE(&frame[3 + i * 2u]);
+                telemetry_.cell_mv[i]   = static_cast<uint16_t>(raw_01mv / 10u);
             }
             telemetry_.num_cells = num;
             markSnapshotBit(type, now_ms);

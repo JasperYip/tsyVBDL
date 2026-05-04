@@ -90,7 +90,7 @@ private:
     static constexpr uint8_t CMD_READ_MAX_CELL       = 0x16;
     static constexpr uint8_t CMD_READ_MIN_CELL       = 0x17;
     static constexpr uint8_t CMD_READ_ONLINE_STATUS  = 0x18;
-    static constexpr uint8_t CMD_READ_CELL_VOLTAGES  = 0x1A;
+    static constexpr uint8_t CMD_READ_CELL_VOLTAGES  = 0x1C;
     static constexpr uint8_t CMD_READ_TEMPERATURES   = 0x1B;
 
     static constexpr uint8_t kPollCommands[8] = {
