@@ -29,7 +29,7 @@ constexpr bool USE_ENCODER = false;
 // -----------------------------
 // CAN
 // -----------------------------
-constexpr uint8_t CAN_NODE_ID = config::NODE_ID_LEFT;
+constexpr uint8_t CAN_NODE_ID = config::NODE_ID_RIGHT;
 static CanBus canBus;
 uint8_t canSequenceControl = 0;
 uint8_t canSequenceFault   = 0;
@@ -322,65 +322,114 @@ void printHelp()
 
 void printStatus(const Estimator::Output& est)
 {
-  const float error = target_mm - est.pos_est_mm;
-  const bool leak_raw_now = leak.isLeak();
-  const bool flt_active = motor.faultActive();
-  const float motor_current_a = motor.readCurrentA();
+  const auto& bms = bmsManager.telemetry();
 
-  Serial.print("mode=");
-  Serial.print(modeName(mode));
+  // ── Header: mode / control state ────────────────────────────────────────
+  Serial.print("mode="); Serial.print(modeName(mode));
+  Serial.print("  state=");
+  switch (mapSystemState()) {
+    case can::STATE_UNHOMED: Serial.print("UNHOMED"); break;
+    case can::STATE_HOMING:  Serial.print("HOMING");  break;
+    case can::STATE_RUN:     Serial.print("RUN");     break;
+    case can::STATE_HOLD:    Serial.print("HOLD");    break;
+    case can::STATE_FAULT:   Serial.print("FAULT");   break;
+    default:                 Serial.print("?");       break;
+  }
+  Serial.print("  target="); Serial.print(target_mm, 1);
+  Serial.print("mm("); Serial.print(target_percent, 0); Serial.print("%)");
+  Serial.print("  err="); Serial.print(target_mm - est.pos_est_mm, 2); Serial.print("mm");
+  Serial.println();
 
-  Serial.print("  mm=");
-  Serial.print(est.pos_est_mm, 3);
+  // ── 0x050  STATUS_FAULT ─────────────────────────────────────────────────
+  Serial.print("  0x050  HF_A=0x"); Serial.print(lastSafety.hard_fault_a, HEX);
+  Serial.print(" HF_B=0x");         Serial.print(lastSafety.hard_fault_b, HEX);
+  Serial.print(" SF=0x");           Serial.print(lastSafety.soft_fault_bits, HEX);
+  Serial.print(" first=");          Serial.print(lastSafety.first_hard_fault);
+  Serial.println();
 
-  Serial.print("  target=");
-  Serial.print(target_mm, 2);
+  // ── 0x200  STATUS_CONTROL ───────────────────────────────────────────────
+  uint8_t flags = 0;
+  if (homed)                               flags |= can::FLAG_HOMED;
+  if (fabs(est.vel_est_mm_s) > 0.5f)      flags |= can::FLAG_MOVING;
+  if (motor.enabled())                     flags |= can::FLAG_MOTOR_EN;
+  if (lastDirectionExtend)                 flags |= can::FLAG_DIR;
+  if (motor.faultActive())                 flags |= can::FLAG_DRIVER_FLT;
+  if (leak.isLeak())                       flags |= can::FLAG_LEAK;
 
-  Serial.print("  target%=");
-  Serial.print(target_percent, 1);
+  Serial.print("  0x200  pos="); Serial.print(est.pos_est_mm, 1); Serial.print("mm");
+  Serial.print("  tof=");        Serial.print((int)lastTofMm); Serial.print("mm");
+  Serial.print("  vel=");        Serial.print(est.vel_est_mm_s, 1); Serial.print("mm/s");
+  Serial.print("  pwm=");        Serial.print(pwm);
+  Serial.print("("); Serial.print((int)(pwm * 100 / PWM_MAX)); Serial.print("%)");
+  Serial.print("  iA=");         Serial.print(motor.readCurrentA(), 2); Serial.print("A");
+  Serial.print("  tofV=");       Serial.print(lastToF.valid ? "Y" : "N");
+  Serial.print("  flags=0x");    Serial.print(flags, HEX);
+  Serial.print("[");
+  if (flags & can::FLAG_HOMED)      Serial.print("HMD ");
+  if (flags & can::FLAG_MOVING)     Serial.print("MOV ");
+  if (flags & can::FLAG_MOTOR_EN)   Serial.print("EN ");
+  if (flags & can::FLAG_DIR)        Serial.print("EXT ");
+  if (flags & can::FLAG_LEAK)       Serial.print("LEAK ");
+  if (flags & can::FLAG_DRIVER_FLT) Serial.print("DRV_FLT ");
+  Serial.print("]");
+  Serial.println();
 
-  Serial.print("  err=");
-  Serial.print(error, 3);
+  // ── 0x210  STATUS_BMS ───────────────────────────────────────────────────
+  Serial.print("  0x210  ");
+  if (!bms.any_response) {
+    Serial.print("NO SIGNAL");
+  } else {
+    Serial.print("pack="); Serial.print(bms.pack_voltage_v, 1); Serial.print("V");
+    Serial.print("  curr="); Serial.print(bms.pack_current_a, 1); Serial.print("A");
+    Serial.print("  min="); Serial.print(bms.min_cell_mv); Serial.print("mV");
+    Serial.print("  max="); Serial.print(bms.max_cell_mv); Serial.print("mV");
+    Serial.print("  T=");
+    Serial.print(bms.pack_temp_dC / 10.0f, 0); Serial.print("C/");
+    if (bms.ext1_temp_dC == -32768) Serial.print("n/c/"); else { Serial.print(bms.ext1_temp_dC / 10.0f, 0); Serial.print("C/"); }
+    if (bms.ext2_temp_dC == -32768) Serial.print("n/c"); else { Serial.print(bms.ext2_temp_dC / 10.0f, 0); Serial.print("C"); }
+    if (!bms.full_snapshot_ready) Serial.print("  (partial)");
+  }
+  Serial.println();
 
-  Serial.print("  vel=");
-  Serial.print(est.vel_est_mm_s, 2);
-
-  Serial.print("  pwm=");
-  Serial.print(pwm);
-
-  Serial.print("  flt=");
-  Serial.print(flt_active ? "Y" : "N");
-
-  Serial.print("  iA=");
-  Serial.print(motor_current_a, 2);
-
-  Serial.print("  tof=");
-  Serial.print(lastTofMm, 1);
-
-  Serial.print("  tofSt=");
-  Serial.print(lastToF.status);
-
-  Serial.print("  tofV=");
-  Serial.print(lastToF.valid ? "Y" : "N");
-
-  Serial.print("  tofF=");
-  Serial.print(lastToF.fresh ? "Y" : "N");
-
-  Serial.print("  homed=");
-  Serial.print(homed ? "Y" : "N");
-
-  Serial.print("  leak=");
-  Serial.print(leak_raw_now ? "1" : "0");
-
-  Serial.print("  HF_A=0x");
-  Serial.print(lastSafety.hard_fault_a, HEX);
-  Serial.print(" HF_B=0x");
-  Serial.print(lastSafety.hard_fault_b, HEX);
-  Serial.print(" SF=0x");
-  Serial.print(lastSafety.soft_fault_bits, HEX);
-  Serial.print(" first=");
-  Serial.print(lastSafety.first_hard_fault);
-
+  // ── 0x220  STATUS_BMS_MORE ──────────────────────────────────────────────
+  Serial.print("  0x220  ");
+  if (!bms.any_response) {
+    Serial.print("NO SIGNAL");
+  } else {
+    // Online status
+    const char* stateStr = "?";
+    switch (bms.online_status) {
+      case 0x0091: stateStr = "Charging";     break;
+      case 0x0092: stateStr = "FullCharged";  break;
+      case 0x0093: stateStr = "Discharging";  break;
+      case 0x0096: stateStr = "Regen";        break;
+      case 0x0097: stateStr = "Idle";         break;
+      case 0x009B: stateStr = "Fault";        break;
+    }
+    Serial.print("state="); Serial.print(stateStr);
+    Serial.print("  cells=");
+    if (bms.num_cells == 0) {
+      Serial.print("waiting...");
+    } else {
+      for (uint8_t i = 0; i < bms.num_cells; i++) {
+        Serial.print(bms.cell_mv[i]);
+        if (i < bms.num_cells - 1) Serial.print("/");
+      }
+      Serial.print("mV");
+    }
+    // BMS fault flags
+    const auto& bf = bmsManager.flags();
+    if (bf.bms_temp_high || bf.bms_overcurrent || bf.bms_switch_fault ||
+        bf.bms_low_voltage || bf.bms_high_voltage) {
+      Serial.print("  BMS_FLT[");
+      if (bf.bms_temp_high)    Serial.print("TEMP ");
+      if (bf.bms_overcurrent)  Serial.print("OC ");
+      if (bf.bms_switch_fault) Serial.print("SW ");
+      if (bf.bms_low_voltage)  Serial.print("LOWV ");
+      if (bf.bms_high_voltage) Serial.print("HIGHV ");
+      Serial.print("]");
+    }
+  }
   Serial.println();
 }
 
