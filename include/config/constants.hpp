@@ -102,6 +102,11 @@ constexpr float SLIP_RECOVERY_GAIN = 0.2f;
 
 constexpr uint16_t TOF_MIN_VALID_MM = 8;
 
+// Raw ToF backstop: only cross-checks against hard limit when filtered position
+// is already within this many mm of the limit, preventing mid-range noise spikes
+// from causing spurious motor cutoffs.
+constexpr float TOF_BACKSTOP_APPROACH_MM = 5.0f;
+
 
 /* ----------------------------------------------------------
    ENCODER + MECHANICS

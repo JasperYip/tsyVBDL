@@ -1156,6 +1156,10 @@ void loop()
         duty *= computeSoftZoneScale(pos);
         if (duty > 0.0f && duty < config::MIN_DUTY) duty = config::MIN_DUTY;
         if (isHardLimitHit(pos, dir)) duty = 0.0f;
+        // Raw ToF backstop: only fires when filtered pos is already near the limit —
+        // a mid-range noise spike can't trigger this and cause a spurious cutoff.
+        if (lastToF.valid && dir  && pos >= config::STROKE_HARD_MAX_MM - config::TOF_BACKSTOP_APPROACH_MM && lastTofMm >= config::STROKE_HARD_MAX_MM) duty = 0.0f;
+        if (lastToF.valid && !dir && pos <= config::STROKE_HARD_MIN_MM + config::TOF_BACKSTOP_APPROACH_MM && lastTofMm <= config::STROKE_HARD_MIN_MM) duty = 0.0f;
         duty = constrain(duty, 0.0f, 1.0f);
         pwm = duty * PWM_MAX;
         motor.setPWM(pwm);
@@ -1210,6 +1214,10 @@ void loop()
       duty *= computeSoftZoneScale(pos);
       if (duty > 0.0f && duty < config::MIN_DUTY) duty = config::MIN_DUTY;
       if (isHardLimitHit(pos, dir)) duty = 0.0f;
+      // Raw ToF backstop: only fires when filtered pos is already near the limit —
+      // a mid-range noise spike can't trigger this and cause a spurious cutoff.
+      if (lastToF.valid && dir  && pos >= config::STROKE_HARD_MAX_MM - config::TOF_BACKSTOP_APPROACH_MM && lastTofMm >= config::STROKE_HARD_MAX_MM) duty = 0.0f;
+      if (lastToF.valid && !dir && pos <= config::STROKE_HARD_MIN_MM + config::TOF_BACKSTOP_APPROACH_MM && lastTofMm <= config::STROKE_HARD_MIN_MM) duty = 0.0f;
       duty = constrain(duty, 0.0f, 1.0f);
       pwm = duty * PWM_MAX;
       motor.setPWM(pwm);
