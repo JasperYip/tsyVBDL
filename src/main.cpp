@@ -25,6 +25,8 @@
 // -----------------------------
 // Set false for motors without an encoder — ToF becomes the sole position source.
 constexpr bool USE_ENCODER = false;
+// Set false to run without BMS hardware connected (disables all BMS faults/timeouts).
+constexpr bool USE_BMS = false;
 
 // -----------------------------
 // CAN
@@ -157,7 +159,8 @@ static Estimator estimator({
   .recovery_gain     = config::SLIP_RECOVERY_GAIN,
   .slip_detect_mm    = config::SLIP_DETECT_MM,
   .tof_min_valid_mm  = config::TOF_MIN_VALID_MM,
-  .tof_only          = !USE_ENCODER
+  .tof_only          = !USE_ENCODER,
+  .tof_filter_alpha  = config::TOF_FILTER_ALPHA
 });
 
 static PIDController pid;
@@ -376,7 +379,9 @@ void printStatus(const Estimator::Output& est)
 
   // ── 0x210  STATUS_BMS ───────────────────────────────────────────────────
   Serial.print("  0x210  ");
-  if (!bms.any_response) {
+  if (!USE_BMS) {
+    Serial.print("BMS DISABLED");
+  } else if (!bms.any_response) {
     Serial.print("NO SIGNAL");
   } else {
     Serial.print("pack="); Serial.print(bms.pack_voltage_v, 1); Serial.print("V");
@@ -393,7 +398,9 @@ void printStatus(const Estimator::Output& est)
 
   // ── 0x220  STATUS_BMS_MORE ──────────────────────────────────────────────
   Serial.print("  0x220  ");
-  if (!bms.any_response) {
+  if (!USE_BMS) {
+    Serial.print("BMS DISABLED");
+  } else if (!bms.any_response) {
     Serial.print("NO SIGNAL");
   } else {
     // Online status
@@ -1003,16 +1010,18 @@ void setup()
 
   canBus.begin(500000, PIN_CAN_R, PIN_CAN_D);
 
-  bmsManager.configure({
-      .transport           = &bmsUart,
-      .poll_interval_ms    = 140,       // 8 commands × 140ms ≈ 1.1s full cycle
-      .response_timeout_ms = 100,
-      .max_retries         = 1,
-      .fault_confirm_ms    = (uint32_t)(config::BMS_TEMP_CONFIRM_S * 1000.0f),
-      .timeout_small_ms    = config::BMS_TIMEOUT_SMALL_MS,
-      .timeout_large_ms    = config::BMS_TIMEOUT_LARGE_MS
-  });
-  bmsManager.begin(millis());
+  if (USE_BMS) {
+    bmsManager.configure({
+        .transport           = &bmsUart,
+        .poll_interval_ms    = 140,       // 8 commands × 140ms ≈ 1.1s full cycle
+        .response_timeout_ms = 100,
+        .max_retries         = 1,
+        .fault_confirm_ms    = (uint32_t)(config::BMS_TEMP_CONFIRM_S * 1000.0f),
+        .timeout_small_ms    = config::BMS_TIMEOUT_SMALL_MS,
+        .timeout_large_ms    = config::BMS_TIMEOUT_LARGE_MS
+    });
+    bmsManager.begin(millis());
+  }
 
   Serial.println("VBD ready - CAN mode. Send CMD_START_HOMING via CAN to home.");
   Serial.println("Serial: 'auto' = serial control, 'debug t/f' = status on/off, 'help' = commands");
@@ -1070,7 +1079,7 @@ void loop()
   // Inputs
   readSerialCommands();
   handleCan();
-  bmsManager.update(now);
+  if (USE_BMS) bmsManager.update(now);
 
   // Emergency resurface: large CAN timeout only — not triggered if a real hard fault exists
   // (real faults stop motor and Pi coordinates; this is only the Pi-is-dead fallback)
@@ -1147,6 +1156,8 @@ void loop()
         float duty = fabs(effort);
         if (duty > 0.0f) duty = config::MIN_DUTY + (1.0f - config::MIN_DUTY) * duty;
         duty *= computeSoftZoneScale(pos);
+        // Re-enforce floor after soft-zone scale: motor gets 0 (holding) or ≥ MIN_DUTY, never in-between.
+        if (duty > 0.0f && duty < config::MIN_DUTY) duty = config::MIN_DUTY;
         if (isHardLimitHit(pos, dir)) duty = 0.0f;
         duty = constrain(duty, 0.0f, 1.0f);
         pwm = duty * PWM_MAX;
@@ -1200,6 +1211,7 @@ void loop()
       float duty = fabs(effort);
       if (duty > 0.0f) duty = config::MIN_DUTY + (1.0f - config::MIN_DUTY) * duty;
       duty *= computeSoftZoneScale(pos);
+      if (duty > 0.0f && duty < config::MIN_DUTY) duty = config::MIN_DUTY;
       if (isHardLimitHit(pos, dir)) duty = 0.0f;
       duty = constrain(duty, 0.0f, 1.0f);
       pwm = duty * PWM_MAX;
@@ -1236,14 +1248,17 @@ void loop()
                        (millis() - lastCanRx > CAN_TIMEOUT_LARGE_MS));
   sin.cmd_timeout_large = can_large_to || inj_cmd_timeout_large;
 
-  const auto& bmsFlags = bmsManager.flags();
-  sin.bms_timeout_small = bmsFlags.bms_timeout_small || inj_bms_timeout_small;
-  sin.bms_timeout_large = bmsFlags.bms_timeout_large || inj_bms_timeout_large;
-  sin.bms_temp_high     = bmsFlags.bms_temp_high     || inj_bms_temp_high;
-  sin.bms_overcurrent   = bmsFlags.bms_overcurrent   || inj_bms_overcurrent;
-  sin.bms_switch_fault  = bmsFlags.bms_switch_fault  || inj_bms_switch_fault;
-  sin.bms_low_voltage   = bmsFlags.bms_low_voltage   || inj_bms_low_voltage;
-  sin.bms_high_voltage  = bmsFlags.bms_high_voltage  || inj_bms_high_voltage;
+  if (USE_BMS) {
+    const auto& bmsFlags = bmsManager.flags();
+    sin.bms_timeout_small = bmsFlags.bms_timeout_small || inj_bms_timeout_small;
+    sin.bms_timeout_large = bmsFlags.bms_timeout_large || inj_bms_timeout_large;
+    sin.bms_temp_high     = bmsFlags.bms_temp_high     || inj_bms_temp_high;
+    sin.bms_overcurrent   = bmsFlags.bms_overcurrent   || inj_bms_overcurrent;
+    sin.bms_switch_fault  = bmsFlags.bms_switch_fault  || inj_bms_switch_fault;
+    sin.bms_low_voltage   = bmsFlags.bms_low_voltage   || inj_bms_low_voltage;
+    sin.bms_high_voltage  = bmsFlags.bms_high_voltage  || inj_bms_high_voltage;
+  }
+  // When USE_BMS = false all BMS safety inputs stay false (zero-initialised above).
 
   sin.tof_valid = inj_tof_invalid ? false : lastToF.valid;
   bool tof_oor = lastToF.valid &&
@@ -1290,7 +1305,7 @@ void loop()
     sendStatusFault();
   }
 
-  if (now - lastCanTxBms >= CAN_TX_BMS_INTERVAL_MS) {
+  if (USE_BMS && (now - lastCanTxBms >= CAN_TX_BMS_INTERVAL_MS)) {
     lastCanTxBms = now;
     sendStatusBms();
     sendStatusBmsMore();

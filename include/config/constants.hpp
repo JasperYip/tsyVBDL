@@ -66,8 +66,8 @@ constexpr float DRIFT_RESTART_MM = 2.0f;   // restart PID
 
 constexpr float HOMING_PWM = 0.60f;          // slow homing
 constexpr float HOMING_BACKOFF_DUTY = 0.10f;  //even slower correction
-constexpr float SOFT_ZONE_MAX_DUTY = 0.50f;   // slower in soft zone
-constexpr float MIN_DUTY = 0.20f; // ~8%
+constexpr float SOFT_ZONE_MAX_DUTY = 0.80f;   // slower in soft zone
+constexpr float MIN_DUTY = 0.25f; // ~10%
 
 
 /* ----------------------------------------------------------
@@ -87,6 +87,10 @@ constexpr float PID_OUT_LIMIT = 1.0f;
 ---------------------------------------------------------- */
 
 constexpr float TOF_FUSION_GAIN = 0.02f;
+
+// EMA alpha for tof_only position filter (lower = smoother but more lag).
+// 0.3 at ~50 Hz ToF ≈ ~40 ms time constant — filters sensor noise at long range.
+constexpr float TOF_FILTER_ALPHA = 0.3f;
 
 constexpr float SLIP_DETECT_MM = 3.0f;
 constexpr float SLIP_RECOVERY_GAIN = 0.2f;
@@ -144,7 +148,7 @@ constexpr float STALL_MIN_DUTY = 0.25f;
 constexpr float STALL_POS_EPS_MM = 0.10f;
 constexpr float STALL_CONFIRM_S = 2.0f;
 constexpr float BMS_TEMP_CONFIRM_S = 2.0f;
-constexpr float HOMING_TIMEOUT_S = 60.0f;
+constexpr float HOMING_TIMEOUT_S = 180.0f;
 
 // debounce
 constexpr float LEAK_DEBOUNCE_S = 0.05f;

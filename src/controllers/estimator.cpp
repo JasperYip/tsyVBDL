@@ -15,6 +15,8 @@ void Estimator::reset()
     last_tof_mm_ = 0;
     last_tof_valid_ = false;
     slip_detected_ = false;
+    tof_filtered_mm_ = 0.0f;
+    tof_filter_init_ = false;
 }
 
 void Estimator::setPositionMm(float pos_mm)
@@ -22,6 +24,8 @@ void Estimator::setPositionMm(float pos_mm)
     pos_est_mm_ = pos_mm;
     vel_est_mm_s_ = 0.0f;
     slip_detected_ = false;
+    tof_filtered_mm_ = pos_mm;
+    tof_filter_init_ = true;
 }
 
 Estimator::Output Estimator::update(int32_t encoder_count,
@@ -36,14 +40,23 @@ Estimator::Output Estimator::update(int32_t encoder_count,
         if (tof_valid) {
             float tof_pos_mm = static_cast<float>(tof_mm);
 
-            // Velocity from consecutive ToF readings.
+            // Seed filter on first valid reading so we don't slew from 0.
+            if (!tof_filter_init_) {
+                tof_filtered_mm_ = tof_pos_mm;
+                tof_filter_init_ = true;
+            } else {
+                tof_filtered_mm_ = cfg_.tof_filter_alpha * tof_pos_mm
+                                 + (1.0f - cfg_.tof_filter_alpha) * tof_filtered_mm_;
+            }
+
+            // Velocity from filtered positions — avoids amplifying raw noise.
             if (last_tof_valid_ && dt > 0.0f) {
-                vel_est_mm_s_ = (tof_pos_mm - static_cast<float>(last_tof_mm_)) / dt;
+                vel_est_mm_s_ = (tof_filtered_mm_ - pos_est_mm_) / dt;
             } else {
                 vel_est_mm_s_ = 0.0f;
             }
 
-            pos_est_mm_  = tof_pos_mm;
+            pos_est_mm_  = tof_filtered_mm_;
             last_tof_mm_ = tof_mm;
         }
         // If ToF is invalid, hold last known position and zero velocity.
