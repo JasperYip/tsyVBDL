@@ -327,6 +327,14 @@ void printStatus(const Estimator::Output& est)
 {
   const auto& bms = bmsManager.telemetry();
 
+  // ── Config banner ────────────────────────────────────────────────────────
+  Serial.print("[NODE:");
+  Serial.print(CAN_NODE_ID == config::NODE_ID_LEFT ? "LEFT" : "RIGHT");
+  Serial.print(" ID="); Serial.print(CAN_NODE_ID);
+  Serial.print(" ENC="); Serial.print(USE_ENCODER ? "Y" : "N");
+  Serial.print(" BMS="); Serial.print(USE_BMS ? "Y" : "N");
+  Serial.print("]  ");
+
   // ── Header: mode / control state ────────────────────────────────────────
   Serial.print("mode="); Serial.print(modeName(mode));
   Serial.print("  state=");
@@ -1021,7 +1029,11 @@ void setup()
     bmsManager.begin(millis());
   }
 
-  Serial.println("VBD ready - CAN mode. Send CMD_START_HOMING via CAN to home.");
+  Serial.print("VBD ready  [NODE: ");
+  Serial.print(CAN_NODE_ID == config::NODE_ID_LEFT ? "LEFT" : "RIGHT");
+  Serial.print("  ID="); Serial.print(CAN_NODE_ID);
+  Serial.print("  ENCODER="); Serial.print(USE_ENCODER ? "YES" : "NO");
+  Serial.print("  BMS="); Serial.println(USE_BMS ? "YES" : "NO");
   Serial.println("Serial: 'auto' = serial control, 'debug t/f' = status on/off, 'help' = commands");
 }
 
