@@ -64,8 +64,12 @@ constexpr float STROKE_SPAN_MM = STROKE_HARD_MAX_MM - STROKE_HARD_MIN_MM;
 constexpr float POS_TOL_MM = 0.1f;   // enter hold mode
 constexpr float DRIFT_RESTART_MM = 2.0f;   // restart PID
 
-constexpr float HOMING_PWM = 0.60f;          // slow homing
-constexpr float HOMING_BACKOFF_DUTY = 0.10f;  //even slower correction
+constexpr float HOMING_PWM = 0.60f;          // retract duty during homing approach
+constexpr float HOMING_BACKOFF_DUTY = 0.15f; // extend duty during homing back-out
+
+// Homing touch point: retract until ToF reads this, then back out to STROKE_HARD_MIN_MM.
+// Must be strictly less than STROKE_HARD_MIN_MM so the back-out phase is always reached.
+constexpr float HOMING_TOUCH_MM = 9.0f;
 constexpr float SOFT_ZONE_MAX_DUTY = 0.80f;   // slower in soft zone
 constexpr float MIN_DUTY = 0.30f; // ~10%
 

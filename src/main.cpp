@@ -86,6 +86,7 @@ float target_mm = target_mm_cmd;
 float target_percent = 0.0f;
 bool homed = false;
 bool homingFailed = false;
+bool homingBackingOut = false;  // true during phase 2: extending back to 10mm reference
 bool proxLatch = false;   // latches true if proximity switch ever fires; cleared by 'recover'
 bool holding = false;
 float homingTimer_s = 0.0f;
@@ -664,6 +665,7 @@ void handleCommand(String cmd)
     homingTimer_s = 0.0f;
     homed = false;
     homingFailed = false;
+    homingBackingOut = false;
     holding = false;
     homingReturnMode = ControlMode::OVERRIDE;
     mode = ControlMode::HOMING;
@@ -739,6 +741,7 @@ void handleCan()
         homingTimer_s = 0.0f;
         homed = false;
         homingFailed = false;
+        homingBackingOut = false;
         holding = false;
         homingReturnMode = ControlMode::CAN;
         mode = ControlMode::HOMING;
@@ -917,7 +920,9 @@ void sendStatusBmsMore()
 }
 
 // -----------------------------
-// Homing (ToF-based)
+// Homing (ToF-based, two-phase)
+// Phase 1: retract until ToF ≤ HOMING_TOUCH_MM (9mm) — confirms physical reference
+// Phase 2: extend back to STROKE_HARD_MIN_MM (10mm) — sets repeatable home position
 // -----------------------------
 void handleHoming(float dt)
 {
@@ -927,28 +932,20 @@ void handleHoming(float dt)
     motor.setPWM(0);
     pwm = 0;
     homingFailed = true;
+    homingBackingOut = false;
     mode = homingReturnMode;
     Serial.println("HOMING TIMEOUT - aborted");
     return;
   }
 
-  // Proximity switch during homing → we've reached the physical backstop, home here
-  if (proxLatch || prox.isTriggered()) {
+  // Proximity switch at any homing phase → treat as physical backstop reached,
+  // skip straight to back-out if not already there.
+  if (!homingBackingOut && (proxLatch || prox.isTriggered())) {
     proxLatch = true;
     motor.setPWM(0);
     pwm = 0;
-    float home_mm = config::STROKE_HARD_MIN_MM;
-    if (USE_ENCODER) {
-      int32_t home_counts = (int32_t)roundf(home_mm / config::MM_PER_COUNT);
-      enc.writeCounts(home_counts);
-    }
-    estimator.reset();
-    estimator.setPositionMm(home_mm);
-    if (USE_ENCODER) estimator.syncEncoder(enc.readCounts());
-    pid.reset();
-    homed = true;
-    mode = homingReturnMode;
-    Serial.println("HOMED by proximity switch");
+    homingBackingOut = true;
+    Serial.println("HOMING: proximity triggered, backing out to 10mm...");
     return;
   }
 
@@ -959,31 +956,50 @@ void handleHoming(float dt)
     return;
   }
 
-  // Home condition: ToF at or inside the hard minimum
-  if (lastTofMm <= config::STROKE_HARD_MIN_MM) {
-    motor.setPWM(0);
-    pwm = 0;
+  // ── Phase 2: back out slowly until ToF reaches 10mm ─────────────────────
+  if (homingBackingOut) {
+    if (lastTofMm >= config::STROKE_HARD_MIN_MM) {
+      motor.setPWM(0);
+      pwm = 0;
 
-    float home_mm = config::STROKE_HARD_MIN_MM;
-    if (USE_ENCODER) {
-      int32_t home_counts = (int32_t)roundf(home_mm / config::MM_PER_COUNT);
-      enc.writeCounts(home_counts);
+      float home_mm = config::STROKE_HARD_MIN_MM;
+      if (USE_ENCODER) {
+        int32_t home_counts = (int32_t)roundf(home_mm / config::MM_PER_COUNT);
+        enc.writeCounts(home_counts);
+      }
+      estimator.reset();
+      estimator.setPositionMm(home_mm);
+      if (USE_ENCODER) estimator.syncEncoder(enc.readCounts());
+      pid.reset();
+
+      homed = true;
+      homingBackingOut = false;
+      mode = homingReturnMode;
+
+      Serial.print("HOMED at 10mm (ToF=");
+      Serial.print(lastTofMm, 1);
+      Serial.println(USE_ENCODER ? "mm, encoder set)" : "mm)");
+      return;
     }
-    estimator.reset();
-    estimator.setPositionMm(home_mm);
-    if (USE_ENCODER) estimator.syncEncoder(enc.readCounts());
-    pid.reset();
 
-    homed = true;
-    mode = homingReturnMode;
-
-    Serial.print("HOMED - ToF=");
-    Serial.print(lastTofMm, 1);
-    Serial.println(USE_ENCODER ? "mm, encoder set to 10mm" : "mm (ToF-only mode)");
+    // Extend slowly — no soft zone scaling, fixed low duty
+    pwm = constrain((int)(config::HOMING_BACKOFF_DUTY * PWM_MAX), 1, PWM_MAX);
+    motor.setDirection(MotorDriver::Direction::EXTEND);
+    lastDirectionExtend = true;
+    motor.setPWM(pwm);
     return;
   }
 
-  // Soft zone scales duty down as we approach 10mm (10-20mm zone)
+  // ── Phase 1: retract until touch point (9mm) ────────────────────────────
+  if (lastTofMm <= config::HOMING_TOUCH_MM) {
+    motor.setPWM(0);
+    pwm = 0;
+    homingBackingOut = true;
+    Serial.println("HOMING: touch at 9mm, backing out to 10mm...");
+    return;
+  }
+
+  // Still retracting — soft zone scales duty as we approach
   float scale = computeSoftZoneScale(lastTofMm);
   float duty  = config::HOMING_PWM * scale;
   pwm = constrain((int)(duty * PWM_MAX), 1, PWM_MAX);
