@@ -84,9 +84,10 @@ ToFSensor::Reading ToFSensor::read() {
     const uint16_t corrected_mm =
       (corrected < 0.0f) ? 0 : static_cast<uint16_t>(corrected);
 
-    out.valid = true;
-    out.fresh = true;
-    out.mm = corrected_mm;
+    out.valid  = true;
+    out.fresh  = true;
+    out.mm     = corrected_mm;
+    out.raw_mm = mm;
     out.status = status;
 
     last_valid_mm_ = corrected_mm;
@@ -95,6 +96,7 @@ ToFSensor::Reading ToFSensor::read() {
 
   out.valid  = false;
   out.fresh  = true;
+  out.raw_mm = mm;
   out.status = status;
   out.mm     = last_valid_mm_;
   return out;

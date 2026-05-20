@@ -19,7 +19,8 @@ public:
   struct Reading {
     bool      fresh;
     bool      valid;
-    uint16_t  mm;
+    uint16_t  mm;      // offset-corrected
+    uint16_t  raw_mm;  // straight from sensor, no offset
     uint8_t   status;
   };
 
@@ -30,6 +31,7 @@ public:
   bool begin(TwoWire& wire = Wire1);
 
   void setMinValidMm(uint16_t mm) { min_valid_mm_ = mm; }
+  void setOffset(float mm)        { offset_mm_ = mm; }
 
   Reading read();
 

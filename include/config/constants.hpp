@@ -80,7 +80,8 @@ constexpr float PID_KD = 0.003f;
 constexpr float PID_I_LIMIT = 5.0f;
 constexpr float PID_OUT_LIMIT = 1.0f;
 
-// constexpr float TOF_OFFSET_MM = 0.0f;
+// Positive = sensor reads short (add to correct). Measure: place at known distance, adjust until tof matches.
+constexpr float TOF_OFFSET_MM = 0.0f;
 
 /* ----------------------------------------------------------
    ESTIMATOR PARAMETERS

@@ -1,21 +1,125 @@
 #include <Arduino.h>
 #include "config/pin_map.hpp"
+#include "config/constants.hpp"
 #include "utils/logger.hpp"
 #include "drivers/proximity.hpp"
+#include "drivers/motor_driver.hpp"
+#include "drivers/tof_sensor.hpp"
+
+// -----------------------------
+// Proximity limit test
+// -----------------------------
+// g  → retract at PWM 20
+// s  → stop immediately
+// Proximity trigger → auto-stop + lock out all further retraction
+// -----------------------------
 
 static ProximitySensor prox(PIN_PROX, true); // active LOW
+static ToFSensor       tof(PIN_TOF_SDA, PIN_TOF_SCL);
+
+static MotorDriver motor({
+  .pin_pwm     = PIN_MOTOR_PWM,
+  .pin_dir     = PIN_MOTOR_DIR,
+  .pin_slp     = PIN_MOTOR_SLP,
+  .pin_flt     = PIN_MOTOR_FLT,
+  .pin_cs      = PIN_MOTOR_CS,
+  .pwm_freq_hz = 25000.0f,
+  .pwm_max     = 255,
+  .flt_active_low    = true,
+  .cs_volts_per_amp  = 0.04f,
+  .adc_ref_volts     = 3.3f,
+  .adc_bits          = 12
+});
+
+static bool running   = false;
+static bool limit_set = false;
+static String cmdBuffer = "";
+
+void stopMotor(const char* reason) {
+  motor.setPWM(0);
+  running = false;
+  Serial.print("STOP — ");
+  Serial.println(reason);
+}
 
 void setup() {
-    logger::begin(115200);
-    LOGI(F("Proximity sensor test"));
-    prox.begin(true);  // use internal pullup
+  Serial.begin(115200);
+  prox.begin(true);   // internal pullup
+  if (!tof.begin(Wire1)) {
+    Serial.println("WARN: ToF init failed");
+  } else {
+    tof.setOffset(config::TOF_OFFSET_MM);
+    Serial.println("ToF init OK");
+  }
+  motor.begin();
+  motor.enable();
+  motor.setDirection(MotorDriver::Direction::RETRACT);
+  motor.setPWM(0);
+
+  Serial.println("\n=== Proximity Limit Test ===");
+  Serial.println("g = retract at PWM 20");
+  Serial.println("s = stop");
+  Serial.println("Proximity switch fires -> auto-stop + hard limit latched");
 }
 
 void loop() {
-    Serial.print("RAW=");
-    Serial.print(prox.raw() ? 1 : 0);
-    Serial.print("  TRIGGERED=");
-    Serial.println(prox.isTriggered() ? 1 : 0);
+  // ── Serial commands ──────────────────────────────────────────────────────
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      cmdBuffer.trim();
+      cmdBuffer.toLowerCase();
+      if (cmdBuffer == "g") {
+        if (limit_set) {
+          Serial.println("BLOCKED — proximity limit already set, retraction not allowed");
+        } else {
+          running = true;
+          motor.setDirection(MotorDriver::Direction::RETRACT);
+          motor.setPWM(20);
+          Serial.println("Retracting at PWM=20 — press s to stop");
+        }
+      } else if (cmdBuffer == "s") {
+        stopMotor("user command");
+      } else if (cmdBuffer.length() > 0) {
+        Serial.println("Unknown — use g or s");
+      }
+      cmdBuffer = "";
+    } else {
+      cmdBuffer += c;
+    }
+  }
 
-    delay(500);
+  // ── Proximity check ──────────────────────────────────────────────────────
+  bool triggered = prox.isTriggered();
+
+  if (triggered && !limit_set) {
+    motor.setPWM(0);
+    running    = false;
+    limit_set  = true;
+    Serial.println(">>> PROXIMITY TRIGGERED — hard limit SET, retraction permanently blocked <<<");
+  }
+
+  // Belt-and-suspenders: if limit is set, motor must be stopped
+  if (limit_set && running) {
+    motor.setPWM(0);
+    running = false;
+    Serial.println("SAFETY: limit set but motor was running — forced stop");
+  }
+
+  // ── Status print every 250 ms ────────────────────────────────────────────
+  static uint32_t lastPrint = 0;
+  if (millis() - lastPrint >= 250) {
+    lastPrint = millis();
+    ToFSensor::Reading tofReading = tof.read();
+    Serial.print("prox_raw=");   Serial.print(prox.raw() ? 1 : 0);
+    Serial.print("  triggered="); Serial.print(triggered ? 1 : 0);
+    Serial.print("  tof_raw=");
+    if (tofReading.valid) { Serial.print(tofReading.raw_mm); Serial.print("mm"); }
+    else                  { Serial.print("---"); }
+    Serial.print("  tof_corrected=");
+    if (tofReading.valid) { Serial.print(tofReading.mm); Serial.print("mm"); }
+    else                  { Serial.print("---"); }
+    Serial.print("  running="); Serial.print(running ? "Y" : "N");
+    Serial.print("  limit=");   Serial.println(limit_set ? "SET" : "clear");
+  }
 }

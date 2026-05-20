@@ -11,6 +11,7 @@
 #include "drivers/tof_sensor.hpp"
 #include "drivers/can_bus.hpp"
 #include "drivers/leak_sensor.hpp"
+#include "drivers/proximity.hpp"
 #include "drivers/bms.hpp"
 
 #include "controllers/estimator.hpp"
@@ -31,7 +32,7 @@ constexpr bool USE_BMS = false;
 // -----------------------------
 // CAN
 // -----------------------------
-constexpr uint8_t CAN_NODE_ID = config::NODE_ID_RIGHT;
+constexpr uint8_t CAN_NODE_ID = config::NODE_ID_LEFT;
 static CanBus canBus;
 uint8_t canSequenceControl = 0;
 uint8_t canSequenceFault   = 0;
@@ -45,7 +46,7 @@ const uint32_t CAN_TX_FAULT_INTERVAL_MS   = 500;  //  2 Hz
 const uint32_t CAN_TX_BMS_INTERVAL_MS     = 500;  //  2 Hz
 uint32_t lastCanRx = 0;
 const uint32_t CAN_TIMEOUT_SMALL_MS = 2000;   // soft fault warning
-const uint32_t CAN_TIMEOUT_LARGE_MS = 10000;  // hard fault latch
+const uint32_t CAN_TIMEOUT_LARGE_MS = 120000;  // hard fault latch
 
 // -----------------------------
 // BMS
@@ -85,6 +86,7 @@ float target_mm = target_mm_cmd;
 float target_percent = 0.0f;
 bool homed = false;
 bool homingFailed = false;
+bool proxLatch = false;   // latches true if proximity switch ever fires; cleared by 'recover'
 bool holding = false;
 float homingTimer_s = 0.0f;
 ControlMode homingReturnMode = ControlMode::CAN;
@@ -151,7 +153,8 @@ static MotorDriver motor({
 });
 
 static ToFSensor tof(PIN_TOF_SDA, PIN_TOF_SCL);
-static LeakSensor leak(PIN_LEAK, true); // active HIGH
+static LeakSensor leak(PIN_LEAK, true);   // active HIGH
+static ProximitySensor prox(PIN_PROX, true); // active LOW
 
 static Estimator estimator({
   .mm_per_count      = config::MM_PER_COUNT,
@@ -366,6 +369,7 @@ void printStatus(const Estimator::Output& est)
   if (lastDirectionExtend)                 flags |= can::FLAG_DIR;
   if (motor.faultActive())                 flags |= can::FLAG_DRIVER_FLT;
   if (leak.isLeak())                       flags |= can::FLAG_LEAK;
+  if (proxLatch || prox.isTriggered())     flags |= can::FLAG_PROX;
 
   Serial.print("  0x200  pos="); Serial.print(est.pos_est_mm, 1); Serial.print("mm");
   Serial.print("  tof=");        Serial.print((int)lastTofMm); Serial.print("mm");
@@ -382,6 +386,7 @@ void printStatus(const Estimator::Output& est)
   if (flags & can::FLAG_DIR)        Serial.print("EXT ");
   if (flags & can::FLAG_LEAK)       Serial.print("LEAK ");
   if (flags & can::FLAG_DRIVER_FLT) Serial.print("DRV_FLT ");
+  if (flags & can::FLAG_PROX)       Serial.print("PROX ");
   Serial.print("]");
   Serial.println();
 
@@ -600,7 +605,8 @@ void handleCommand(String cmd)
   if (cmd == "recover") {
     safety.reset();
     lastSafety = {};
-    Serial.println("Safety manager reset requested");
+    proxLatch = false;
+    Serial.println("Safety manager reset (prox latch cleared)");
     return;
   }
 
@@ -765,7 +771,8 @@ uint8_t buildControlFlags()
   if (motor.enabled()) flags |= can::FLAG_MOTOR_EN;
   if (lastDirectionExtend) flags |= can::FLAG_DIR;
   if (motor.faultActive() || inj_driver_fault_raw) flags |= can::FLAG_DRIVER_FLT;
-  if (leak.isLeak() || inj_leak) flags |= can::FLAG_LEAK;
+  if (leak.isLeak() || inj_leak)                   flags |= can::FLAG_LEAK;
+  if (proxLatch || prox.isTriggered())             flags |= can::FLAG_PROX;
   return flags;
 }
 
@@ -925,6 +932,26 @@ void handleHoming(float dt)
     return;
   }
 
+  // Proximity switch during homing → we've reached the physical backstop, home here
+  if (proxLatch || prox.isTriggered()) {
+    proxLatch = true;
+    motor.setPWM(0);
+    pwm = 0;
+    float home_mm = config::STROKE_HARD_MIN_MM;
+    if (USE_ENCODER) {
+      int32_t home_counts = (int32_t)roundf(home_mm / config::MM_PER_COUNT);
+      enc.writeCounts(home_counts);
+    }
+    estimator.reset();
+    estimator.setPositionMm(home_mm);
+    if (USE_ENCODER) estimator.syncEncoder(enc.readCounts());
+    pid.reset();
+    homed = true;
+    mode = homingReturnMode;
+    Serial.println("HOMED by proximity switch");
+    return;
+  }
+
   // Wait for a plausible ToF reading before moving
   if (lastTofMm < config::TOF_MIN_VALID_MM) {
     motor.setPWM(0);
@@ -980,6 +1007,7 @@ void setup()
 
   if (USE_ENCODER) enc.begin();
   leak.begin(false); // Blue Robotics SOS style output: active high
+  prox.begin(true);  // internal pullup, active LOW
 
   estimator.reset();
   if (USE_ENCODER) estimator.syncEncoder(enc.readCounts());
@@ -989,6 +1017,7 @@ void setup()
   } else {
     Serial.println("ToF init OK");
   }
+  tof.setOffset(config::TOF_OFFSET_MM);
 
   motor.begin();
   motor.enable();
@@ -1087,6 +1116,14 @@ void loop()
     lastToF.mm,
     dt
   );
+
+  // Proximity safety gate — latch on first trigger, cleared only by 'recover'
+  if (prox.isTriggered() && !proxLatch) {
+    proxLatch = true;
+    motor.setPWM(0);
+    pwm = 0;
+    Serial.println("!! PROXIMITY triggered — retraction hard stop latched (send 'recover' to clear)");
+  }
 
   // Inputs
   readSerialCommands();
@@ -1239,6 +1276,12 @@ void loop()
     }
 
     } // end homed/EMERGENCY_RESURFACE branch
+  }
+
+  // Proximity hard gate: if latched, block any retraction regardless of mode
+  if (proxLatch && !lastDirectionExtend) {
+    motor.setPWM(0);
+    pwm = 0;
   }
 
   // -----------------------------
