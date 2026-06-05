@@ -32,7 +32,7 @@ constexpr bool USE_BMS = false;
 // -----------------------------
 // CAN
 // -----------------------------
-constexpr uint8_t CAN_NODE_ID = config::NODE_ID_LEFT;
+constexpr uint8_t CAN_NODE_ID = config::NODE_ID_RIGHT;
 static CanBus canBus;
 uint8_t canSequenceControl = 0;
 uint8_t canSequenceFault   = 0;
