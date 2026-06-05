@@ -731,6 +731,22 @@ void handleCan()
 
       if (mode != ControlMode::CAN) continue;
 
+      // Fault clear — rising edge, mirrors the serial 'recover' command exactly.
+      static bool lastFaultClearBit = false;
+      const bool faultClearBit    = (msg.command_mode & can::CMD_FAULT_CLEAR) != 0;
+      const bool faultClearRising = faultClearBit && !lastFaultClearBit;
+      lastFaultClearBit = faultClearBit;
+
+      if (faultClearRising) {
+        safety.reset();
+        lastSafety  = {};
+        homingFailed = false;
+        proxLatch   = false;
+        if (mode != ControlMode::HOMING) mode = ControlMode::CAN;
+        Serial.println("CAN: fault clear — safety reset, prox latch cleared");
+        continue;
+      }
+
       // Homing triggered by Pi
       if ((msg.command_mode & can::CMD_START_HOMING) && !homed) {
         motor.setPWM(0);
