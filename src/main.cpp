@@ -729,9 +729,8 @@ void handleCan()
       can::CmdSetpoint msg;
       can::unpackCmdSetpoint(frame.data, msg);
 
-      if (mode != ControlMode::CAN) continue;
-
-      // Fault clear — rising edge, mirrors the serial 'recover' command exactly.
+      // Fault clear — rising edge, processed before mode guard so it works
+      // from EMERGENCY_RESURFACE as well as normal CAN mode.
       static bool lastFaultClearBit = false;
       const bool faultClearBit    = (msg.command_mode & can::CMD_FAULT_CLEAR) != 0;
       const bool faultClearRising = faultClearBit && !lastFaultClearBit;
@@ -742,10 +741,17 @@ void handleCan()
         lastSafety  = {};
         homingFailed = false;
         proxLatch   = false;
-        if (mode != ControlMode::HOMING) mode = ControlMode::CAN;
-        Serial.println("CAN: fault clear — safety reset, prox latch cleared");
+        if (!motor.enabled()) motor.enable();
+        mode = ControlMode::CAN;
+        target_mm     = lastEst.pos_est_mm;
+        target_mm_cmd = target_mm;
+        pid.reset();
+        holding = false;
+        Serial.println("CAN: fault clear — safety reset, returning to CAN mode");
         continue;
       }
+
+      if (mode != ControlMode::CAN) continue;
 
       // Homing triggered by Pi
       if ((msg.command_mode & can::CMD_START_HOMING) && !homed) {
